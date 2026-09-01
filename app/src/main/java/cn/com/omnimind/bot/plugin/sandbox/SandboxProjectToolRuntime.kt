@@ -99,8 +99,6 @@ internal object SandboxProjectToolPolicy {
     const val XIAOWAN_INVOKE = "xiaowan.invoke"
 
     private const val PROJECT_ID_PREFIX = "local.project."
-    private const val MAX_TOOLS = 32
-    private const val MAX_CONNECTORS = 16
     private val toolName = Regex("^[a-z][a-z0-9_]{1,39}$")
     private val connectorId = Regex("^[a-z][a-z0-9_]{1,39}$")
 
@@ -114,12 +112,6 @@ internal object SandboxProjectToolPolicy {
             "Unsupported project toolkit schema: ${toolkit.schemaVersion}"
         }
         require(toolkit.tools.isNotEmpty()) { "Project toolkit must declare at least one tool" }
-        require(toolkit.tools.size <= MAX_TOOLS) {
-            "Project toolkit declares ${toolkit.tools.size} tools; the limit is $MAX_TOOLS"
-        }
-        require(toolkit.connectors.size <= MAX_CONNECTORS) {
-            "Project toolkit declares ${toolkit.connectors.size} connectors; the limit is $MAX_CONNECTORS"
-        }
         val duplicateConnector = toolkit.connectors.groupBy(SandboxProjectConnector::id)
             .entries.firstOrNull { it.value.size > 1 }
             ?.key

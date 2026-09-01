@@ -2920,7 +2920,7 @@ internal class LocalAcpRuntime(
         // a misleading substitute for a prompt that did not exist.
         val execution = promptExecutions[threadId]
         val promptStarted = execution?.requestCancellation() == true
-        val protocolCancelled = if (promptStarted) {
+        if (promptStarted) {
             withTimeoutOrNull(CANCEL_REQUEST_TIMEOUT_MS) {
                 try {
                     session.cancel()
@@ -2940,40 +2940,7 @@ internal class LocalAcpRuntime(
                     Log.w(TAG, "ACP session cancellation request failed", error)
                     false
                 }
-            } == true
-        } else {
-            true
-        }
-
-        val promptJob = execution?.promptJob()
-        val collectorStopped = if (promptJob != null) {
-            withTimeoutOrNull(CANCEL_JOIN_TIMEOUT_MS) {
-                // Let the official ClientSession prompt flow observe its own
-                // PromptResponse(CANCELLED). Cancelling this collector here
-                // would discard that protocol terminal event.
-                promptJob.join()
-                true
-            } == true
-        } else {
-            true
-        }
-
-        // If the adapter ignored cancellation and the collector did not
-        // terminate, close the ACP process as a last-resort kill switch. The
-        // next prompt will reconnect through ensureLocalAcpConnected(). This
-        // is preferable to leaving a Harness executing tools after the user
-        // explicitly pressed stop.
-        if (turnId != null && !collectorStopped) {
-            Log.w(
-                TAG,
-                "ACP cancellation did not settle for session=$threadId " +
-                    "protocolCancelled=$protocolCancelled " +
-                    "collectorStopped=$collectorStopped; closing process"
-            )
-            runCatching { disconnect() }
-                .onFailure { error ->
-                    Log.w(TAG, "Unable to close ACP process after cancellation", error)
-                }
+            }
         }
 
         return mapOf(

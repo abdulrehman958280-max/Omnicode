@@ -1568,27 +1568,10 @@ abstract class _ChatPageStateBase extends State<ChatPage>
     final conversationId = _modeState(mode).currentConversationId;
     if (conversationId == null) return;
     try {
-      final response = await AgentRuntimeService.cancelPrompt(
+      await AgentRuntimeService.cancelPrompt(
         conversationId: conversationId,
         sessionId: sessionId,
         promptId: turnId,
-      );
-      final runtime = _runtimeCoordinator.runtimeFor(
-        conversationId: conversationId,
-        mode: _modeKey(mode),
-      );
-      if (runtime?.isAiResponding != true) return;
-      _runtimeCoordinator.applyAcpPromptResponse(
-        conversationId: conversationId,
-        mode: _modeKey(mode),
-        sessionId: response['sessionId']?.toString() ?? sessionId,
-        turnId:
-            response['turnId']?.toString() ??
-            response['promptId']?.toString() ??
-            turnId ??
-            runtime?.activeAcpTurnId,
-        stopReason: 'cancelled',
-        conversation: _modeState(mode).currentConversation,
       );
     } catch (error) {
       debugPrint('ACP cancellation failed: $error');

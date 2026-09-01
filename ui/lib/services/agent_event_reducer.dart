@@ -1549,32 +1549,6 @@ class AgentEventReducer {
       );
     }
 
-    if (method == 'codex/disconnected') {
-      // A remote bridge can disappear before it has a chance to send the
-      // normal turn/failed notification. Finalize the one active host turn
-      // here; otherwise the chat remains in "thinking" forever and the next
-      // prompt is rejected as a second active turn.
-      final taskId =
-          runtime.currentDispatchTurnId ??
-          runtime.lastAgentTurnId ??
-          runtime.activeRunId;
-      if (runtime.isAiResponding && taskId != null && taskId.isNotEmpty) {
-        _recordTurnFailure(
-          runtime,
-          taskId: taskId,
-          detail: 'Remote ACP bridge disconnected.',
-          params: params,
-        );
-        _completeTurn(runtime, taskId, appendCancelIfEmpty: false);
-      }
-      return AgentReduceResult(
-        handled: true,
-        method: method,
-        threadId: threadId,
-        turnId: turnId,
-      );
-    }
-
     if (method == 'account/updated' ||
         method == 'account/login/completed' ||
         method == 'account/rateLimits/updated' ||

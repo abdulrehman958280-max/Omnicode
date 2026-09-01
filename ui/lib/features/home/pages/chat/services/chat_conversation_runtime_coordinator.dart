@@ -749,7 +749,6 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
       case 'turn/completed':
       case 'turn/failed':
       case 'thread/closed':
-      case 'codex/disconnected':
         return true;
       case 'thread/status/changed':
         final params = _eventParams(event);

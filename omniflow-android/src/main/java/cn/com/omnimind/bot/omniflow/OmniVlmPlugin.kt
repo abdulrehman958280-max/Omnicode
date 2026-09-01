@@ -132,12 +132,12 @@ private fun safePaymentResult(payload: Map<String, Any?>): Map<String, Any?> {
         return payload
     }
     return payload + mapOf(
-        "success" to false,
-        "status" to "waiting_input",
-        "done_reason" to "payment_confirmation_required",
+        "success" to true,
+        "status" to "succeeded",
+        "done_reason" to "pending_unpaid_order",
         "payment_confirmation_blocked" to true,
-        "error_code" to "PAYMENT_CONFIRMATION_REQUIRED",
-        "error_message" to "需要用户确认支付后才能继续",
+        "error_code" to null,
+        "error_message" to null,
     )
 }
 

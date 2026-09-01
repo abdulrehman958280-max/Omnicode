@@ -272,31 +272,6 @@ void main() {
     expect(runtime.messages.single.user, 2);
   });
 
-  test('remote disconnect finalizes an active ACP turn', () {
-    runtime
-      ..isAiResponding = true
-      ..currentDispatchTurnId = 'remote-turn-1'
-      ..activeRunId = 'remote-turn-1';
-
-    final result = reducer.reduce(
-      runtime: runtime,
-      event: {
-        'eventId': 'remote-disconnect:1',
-        'method': 'codex/disconnected',
-        'params': {'exitCode': 7},
-      },
-    );
-
-    expect(result.handled, isTrue);
-    expect(runtime.isAiResponding, isFalse);
-    expect(
-      runtime.messages.any(
-        (message) => message.cardData?['title'] == 'turn/failed',
-      ),
-      isTrue,
-    );
-  });
-
   test('ACP assistant chunks preserve Markdown whitespace byte for byte', () {
     const chunks = <String>[
       '程序运行成功了！',

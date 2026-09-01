@@ -2246,22 +2246,11 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
       return;
     }
     try {
-      final response = await AgentRuntimeService.cancelPrompt(
+      await AgentRuntimeService.cancelPrompt(
         conversationId: _isRemoteCodexConfigured() ? null : conversationId,
         sessionId: sessionId,
         promptId: turnId,
       );
-      final runtime = _activeRuntime;
-      if (runtime?.isAiResponding == true && conversationId != null) {
-        _runtimeCoordinator.applyAcpPromptResponse(
-          conversationId: conversationId,
-          mode: kChatRuntimeModeAgent,
-          sessionId: response['sessionId']?.toString() ?? sessionId,
-          turnId: response['turnId']?.toString() ?? turnId,
-          stopReason: 'cancelled',
-          conversation: _modeState(ChatPageMode.agent).currentConversation,
-        );
-      }
     } catch (error) {
       debugPrint('Agent interrupt failed: $error');
     }

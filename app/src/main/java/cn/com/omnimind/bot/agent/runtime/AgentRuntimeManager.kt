@@ -601,12 +601,7 @@ class AgentRuntimeManager private constructor(
                 // boundary before dropping the session mapping; otherwise
                 // the UI can keep the old conversation in "running" while
                 // the new runtime is already selected.
-                finishRemoteDisconnect(
-                    mapOf(
-                        "method" to "codex/disconnected",
-                        "params" to mapOf("reason" to "runtime_switch"),
-                    )
-                )
+                finishRemoteDisconnect()
                 // Fence the old callback before closing the transport. A
                 // close callback from the old connection must not be routed
                 // into the newly selected runtime.
@@ -650,12 +645,7 @@ class AgentRuntimeManager private constructor(
                 // unexpected bridge exit. Clearing host reservations alone
                 // is not enough: Flutter needs one terminal ACP event for
                 // every active conversation/turn.
-                finishRemoteDisconnect(
-                    mapOf(
-                        "method" to "codex/disconnected",
-                        "params" to mapOf("reason" to "host_disconnect"),
-                    )
-                )
+                finishRemoteDisconnect()
                 session = null
                 existingSession.disconnect()
             }
@@ -1243,23 +1233,9 @@ class AgentRuntimeManager private constructor(
         // session/cancel for an already-terminated turn on a new transport.
         val activeSession = session?.takeIf { it.isRunning }
         if (activeSession == null) {
-            val ownsTerminal = clearActiveTurn(
-                sessionId,
-                turnId,
-                terminalStatus = "cancelled",
+            throw IllegalStateException(
+                "Remote ACP transport is unavailable for session/cancel."
             )
-            // The returned session/cancel result is the lifecycle boundary.
-            return mapOf(
-                "cancelled" to true,
-                "sessionId" to sessionId,
-                "threadId" to sessionId,
-                "turnId" to turnId,
-            ).withAcpSessionId()
-                .withLocalIds(
-                    threadId = sessionId,
-                    conversationId = conversationIdForSession(sessionId),
-                    turnId = turnId,
-                )
         }
         val execution = remotePromptExecutions[sessionId]
         val promptStarted = execution?.requestCancellation() == true
@@ -1279,53 +1255,10 @@ class AgentRuntimeManager private constructor(
                 mapOf("sessionId" to sessionId),
             )
         }
-        val promptJob = execution?.promptJob()
-        val promptSettled = if (promptJob != null && promptJob != coroutineContext[Job]) {
-            withTimeoutOrNull(REMOTE_CANCEL_TIMEOUT_MS) {
-                promptJob.join()
-                true
-            } == true
-        } else {
-            true
-        }
-        if (!promptSettled) {
-            // A broken bridge is a transport failure. Stop its waiter only
-            // after the bounded grace period. Closing the transport is
-            // required because cancelling the host waiter does not prove the
-            // remote Agent stopped executing tools. The transport owns every
-            // remote session, so finish all of its turns before closing it;
-            // clearing only the requested turn would leave parallel sessions
-            // permanently running in the UI.
-            if (session === activeSession) {
-                finishRemoteDisconnect(
-                    mapOf(
-                        "method" to "codex/disconnected",
-                        "params" to mapOf("reason" to "cancel_timeout"),
-                    )
-                )
-            }
-            execution?.cancelForTransport(
-                CancellationException("Remote ACP cancellation timed out")
-            )
-            if (session === activeSession) {
-                runCatching { activeSession.disconnect() }
-                    .onFailure { error ->
-                        Log.w(
-                            "AgentRuntimeManager",
-                            "Unable to close remote ACP transport after cancellation timeout",
-                            error,
-                        )
-                    }
-                if (session === activeSession) session = null
-            }
-            execution?.let { remotePromptExecutions.remove(sessionId, it) }
-        }
-        val ownsTerminal = clearActiveTurn(
-            sessionId,
-            turnId,
-            terminalStatus = "cancelled",
-        )
-        // The returned session/cancel result is the lifecycle boundary.
+        // `session/cancel` is a notification. The active prompt remains the
+        // owner until the Agent returns its official PromptResponse; this
+        // method must not invent a local cancelled terminal or force-close a
+        // still-valid ACP transport after an arbitrary grace period.
         return mapOf(
             "cancelled" to true,
             "sessionId" to sessionId,
@@ -2924,7 +2857,7 @@ class AgentRuntimeManager private constructor(
                 )
                 return
             }
-            if (finishRemoteDisconnect(publicMessage)) return
+            if (finishRemoteDisconnect()) return
         }
         val rawExtensionParams = publicMessage["params"]
         val explicitParams = extractRemoteCodexServerParams(publicMessage)
@@ -3174,13 +3107,8 @@ class AgentRuntimeManager private constructor(
      * old first-record behavior made parallel sessions leak their spinner and
      * left stale session/conversation attribution across reconnects.
      */
-    private suspend fun finishRemoteDisconnect(
-        message: Map<String, Any?>,
-    ): Boolean {
+    private suspend fun finishRemoteDisconnect(): Boolean {
         val activeRecords = remoteTurnOwnership.activeRecords()
-        val conversationIds = activeRecords.associate { record ->
-            record.sessionId to conversationIdForSession(record.sessionId)
-        }
         remotePromptExecutions.values.toList().forEach { execution ->
             execution.cancelForTransport(
                 CancellationException("Remote ACP runtime disconnected")
@@ -3198,25 +3126,6 @@ class AgentRuntimeManager private constructor(
             error = failureMessage,
         ).forEach { record ->
             releaseTurnRuntime(record.sessionId, record.turnId)
-            val params = linkedMapOf<String, Any?>().apply {
-                putAll(extractRemoteCodexServerParams(message))
-                put("error", failureMessage)
-            }
-            emitEvent(
-                linkedMapOf(
-                    "method" to "codex/disconnected",
-                    "id" to message["id"],
-                    "workspaceId" to RemoteCodexAppServerSession.DEFAULT_WORKSPACE_ID,
-                    "threadId" to record.sessionId,
-                    "turnId" to record.turnId,
-                    "conversationId" to conversationIds[record.sessionId],
-                    "agentId" to AcpAgentProfileStore.CODEX_AGENT_ID,
-                    "agentName" to "Codex",
-                    "allowImplicitTurnAdmission" to false,
-                    "params" to params,
-                    "message" to message,
-                )
-            )
         }
         return true
     }
@@ -3863,7 +3772,6 @@ private fun isTerminalAgentLifecycleEvent(event: Map<String, Any?>): Boolean {
         "turn/completed",
         "turn/failed",
         "thread/closed",
-        "codex/disconnected",
     )
 }
 
