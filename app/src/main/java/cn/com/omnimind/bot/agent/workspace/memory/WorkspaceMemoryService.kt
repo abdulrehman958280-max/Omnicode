@@ -914,7 +914,7 @@ class WorkspaceMemoryService(
                     )
                 )
             ),
-            maxCompletionTokens = 768,
+            maxCompletionTokens = null,
             temperature = 0.2,
             tools = listOf(
                 ChatCompletionTool(

@@ -27,6 +27,7 @@ interface AgentExecutionEnvironment {
     val workspaceMemoryService: WorkspaceMemoryService
     val conversationMode: String
     val reasoningEffort: String?
+    val runtimeSettings: AgentRuntimeSettings get() = AgentRuntimeSettings()
     val modelProviderProfileId: String? get() = null
     val terminalEnvironment: Map<String, String>
     val runControl: AgentRunControl
@@ -59,6 +60,7 @@ data class DefaultAgentExecutionEnvironment(
     override val workspaceMemoryService: WorkspaceMemoryService,
     override val conversationMode: String,
     override val reasoningEffort: String? = null,
+    override val runtimeSettings: AgentRuntimeSettings = AgentRuntimeSettings(),
     override val modelProviderProfileId: String? = null,
     override val terminalEnvironment: Map<String, String> = emptyMap(),
     override val runControl: AgentRunControl = NoOpAgentRunControl,
@@ -95,7 +97,7 @@ interface AgentToolCatalog {
     fun validateArguments(toolName: String, arguments: JsonObject)
 
     /** Search the complete internal catalog without exposing every schema. */
-    fun searchTools(query: String, limit: Int): List<AgentToolSearchEntry> = emptyList()
+    fun searchTools(query: String, limit: Int? = null): List<AgentToolSearchEntry> = emptyList()
 
     /** Make selected schemas visible to the next model round. */
     fun exposeToolNames(names: Set<String>) = Unit

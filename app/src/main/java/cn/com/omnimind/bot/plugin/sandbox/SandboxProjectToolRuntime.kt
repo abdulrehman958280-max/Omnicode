@@ -64,7 +64,7 @@ internal object SandboxConnectorContract {
         },
         "xiaowanDefaults" to mapOf(
             "reasoning_effort" to XiaowanChatCompletionRequestFactory.DEFAULT_REASONING_EFFORT,
-            "max_tokens" to XiaowanChatCompletionRequestFactory.DEFAULT_MAX_TOKENS,
+            "max_tokens" to null,
             "temperature" to XiaowanChatCompletionRequestFactory.DEFAULT_TEMPERATURE,
         ),
         "dashboardBridge" to mapOf(
@@ -448,8 +448,8 @@ internal object SandboxProjectConnectorRegistry {
                 "Project tool ${tool.name} instruction exceeds $MAX_INSTRUCTION_CHARS characters"
             }
             config["max_tokens"]?.let { value ->
-                require(value.jsonPrimitive.intOrNull?.let { it in 32..4_096 } == true) {
-                    "Project tool ${tool.name} max_tokens must be an integer between 32 and 4096"
+                require(value.jsonPrimitive.intOrNull != null) {
+                    "Project tool ${tool.name} max_tokens must be an integer"
                 }
             }
             config["temperature"]?.let { value ->
@@ -717,8 +717,7 @@ internal object SandboxProjectConnectorRegistry {
         return XiaowanChatCompletionRequestFactory.create(
             prompt = prompt,
             system = system,
-            maxTokens = config["max_tokens"]?.jsonPrimitive?.intOrNull
-                ?: XiaowanChatCompletionRequestFactory.DEFAULT_MAX_TOKENS,
+            maxTokens = config["max_tokens"]?.jsonPrimitive?.intOrNull,
             temperature = config["temperature"]?.jsonPrimitive?.doubleOrNull
                 ?: XiaowanChatCompletionRequestFactory.DEFAULT_TEMPERATURE,
             reasoningEffort = reasoningEffort,

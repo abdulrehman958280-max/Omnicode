@@ -2246,10 +2246,10 @@ void main() {
     expect(message.isError, isTrue);
     expect(message.content?['agentErrorText'], '网络连接中断');
     expect(message.content?['agentRetryable'], isTrue);
-    expect(message.content?['agentContinueable'], isFalse);
+    expect(message.content?['agentContinueable'], isNull);
   });
 
-  test('keeps partial ACP output non-error when recovery is continuable', () {
+  test('does not project partial ACP recovery as a continuation action', () {
     reducer.reduce(
       runtime: runtime,
       event: {
@@ -2280,8 +2280,8 @@ void main() {
     final message = runtime.messages.single;
     expect(message.text, '半截答案');
     expect(message.isError, isFalse);
-    expect(message.content?['agentContinueable'], isTrue);
-    expect(message.content?['agentContinueResumeMode'], 'approximate');
+    expect(message.content?['agentContinueable'], isNull);
+    expect(message.content?['agentContinueResumeMode'], isNull);
   });
 
   test(

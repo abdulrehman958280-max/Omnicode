@@ -137,8 +137,9 @@ class HttpAgentLlmClient(
     // This is the single transport retry owner. A retry is safe only before
     // visible output exists; replaying a started stream duplicates reasoning,
     // text, and potentially tool intent.
-    private val maxTransientStreamRetries: Int = 1,
-    private val transientStreamRetryDelayMs: Long = 750L,
+    private val maxTransientStreamRetries: Int? = null,
+    private val transientStreamRetryDelayMs: Long? = null,
+    private val streamIdleTimeoutMs: Long? = null,
     private val json: Json = Json {
         ignoreUnknownKeys = true
         isLenient = true
@@ -148,8 +149,14 @@ class HttpAgentLlmClient(
     // ACP has its own inactivity watchdog. Keep the Provider transport
     // deadline shorter so a dead SSE connection is converted into a terminal
     // Agent error before ACP reports a stalled turn with no recovery path.
-    private val streamIdleTimeoutMs: Long = AgentTurnTimingPolicy.PROVIDER_STREAM_IDLE_TIMEOUT_MS,
+    private val runtimeSettings: AgentRuntimeSettings = AgentRuntimeSettings(),
 ) : AgentLlmClient {
+    private val effectiveMaxTransientStreamRetries: Int?
+        get() = runtimeSettings.maxTransientStreamRetries ?: maxTransientStreamRetries
+    private val effectiveTransientStreamRetryDelayMs: Long?
+        get() = runtimeSettings.transientStreamRetryDelayMs ?: transientStreamRetryDelayMs
+    private val effectiveStreamIdleTimeoutMs: Long?
+        get() = runtimeSettings.streamIdleTimeoutMs ?: streamIdleTimeoutMs
     private val modelOverride: AgentModelOverride? = modelOverride?.normalized()
     private val tag = "HttpAgentLlmClient"
     private companion object {
@@ -174,7 +181,6 @@ class HttpAgentLlmClient(
         // and the 16K ceiling can reserve several times a user's weekly allowance
         // before the vision model is called. A vision turn only needs the current
         // image question; subsequent text turns still use the normal agent context.
-        const val PLATFORM_VISION_MAX_COMPLETION_TOKENS = 1_024
     }
 
     internal data class StreamRequestVariant(
@@ -498,7 +504,7 @@ class HttpAgentLlmClient(
         onReasoningUpdate: (suspend (String) -> Unit)?,
         onContentUpdate: (suspend (String) -> Unit)?
     ): ChatCompletionTurn {
-        val retryCount = maxTransientStreamRetries.coerceAtLeast(0)
+        val retryCount = effectiveMaxTransientStreamRetries?.coerceAtLeast(0) ?: 0
         var retriedIncompleteToolCall = false
         repeat(retryCount + 1) { attempt ->
             var attemptProducedOutput = false
@@ -540,7 +546,8 @@ class HttpAgentLlmClient(
                     attempt >= retryCount ||
                     !isTransientStreamFailure(error)
                 ) throw error
-                val delayMs = transientStreamRetryDelayMs.coerceAtLeast(0L) * (attempt + 1L)
+                val delayMs = (effectiveTransientStreamRetryDelayMs ?: 0L)
+                    .coerceAtLeast(0L) * (attempt + 1L)
                 OmniLog.w(
                     tag,
                     "transient stream failure, retrying attempt=${attempt + 1}/$retryCount " +
@@ -770,9 +777,9 @@ class HttpAgentLlmClient(
             eventSource?.cancel()
         }
 
-        fun failIdleStream() {
+        fun failIdleStream(timeoutMs: Long) {
             if (!completed.compareAndSet(false, true)) return
-            val error = AgentStreamIdleTimeoutException(streamIdleTimeoutMs)
+            val error = AgentStreamIdleTimeoutException(timeoutMs)
             OmniLog.w(
                 tag,
                 "ACP provider timing stage=stream_idle_timeout " +
@@ -782,16 +789,18 @@ class HttpAgentLlmClient(
             eventSource?.cancel()
         }
 
-        val idleWatchdog = scope.launch {
-                val checkIntervalMs = streamIdleTimeoutMs.coerceIn(1L, 1_000L)
-            while (!completed.get()) {
-                delay(checkIntervalMs)
-                if (
-                    System.currentTimeMillis() - lastStreamActivityAtMs.get() >=
-                    streamIdleTimeoutMs.coerceAtLeast(1L)
-                ) {
-                    failIdleStream()
-                    break
+        val idleWatchdog = effectiveStreamIdleTimeoutMs?.let { timeoutMs ->
+            scope.launch {
+                val checkIntervalMs = timeoutMs.coerceIn(1L, 1_000L)
+                while (!completed.get()) {
+                    delay(checkIntervalMs)
+                    if (
+                        System.currentTimeMillis() - lastStreamActivityAtMs.get() >=
+                        timeoutMs.coerceAtLeast(1L)
+                    ) {
+                        failIdleStream(timeoutMs)
+                        break
+                    }
                 }
             }
         }
@@ -931,7 +940,7 @@ class HttpAgentLlmClient(
             )
             return streamDone.await()
         } finally {
-            idleWatchdog.cancel()
+            idleWatchdog?.cancel()
             reasoningEmitJob?.cancel()
             eventSource?.cancel()
             emissionQueue.close()
@@ -1345,10 +1354,8 @@ class HttpAgentLlmClient(
         return copy(
             messages = currentImageMessage?.let(::listOf) ?: messages,
             model = model,
-            maxCompletionTokens = maxCompletionTokens?.coerceAtMost(
-                PLATFORM_VISION_MAX_COMPLETION_TOKENS
-            ),
-            maxTokens = maxTokens?.coerceAtMost(PLATFORM_VISION_MAX_COMPLETION_TOKENS),
+            maxCompletionTokens = maxCompletionTokens,
+            maxTokens = maxTokens,
             tools = emptyList(),
             toolChoice = null,
             parallelToolCalls = null,

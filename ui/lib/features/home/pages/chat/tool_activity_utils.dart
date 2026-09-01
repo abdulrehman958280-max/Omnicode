@@ -260,6 +260,92 @@ String resolveAgentToolTitle(Map<String, dynamic> cardData) {
   );
 }
 
+/// Returns the user-facing label for the tool that is currently executing.
+///
+/// ACP already provides the tool lifecycle and title. This is only a display
+/// projection for the live UI: it must not become another status source. In
+/// particular, keep the action visible even when the model emits no reasoning
+/// text (which is valid for a tool-only turn).
+String resolveAgentToolProgressTitle(
+  Map<String, dynamic> cardData, {
+  required bool isEnglish,
+}) {
+  final status = (cardData['status'] ?? '').toString().trim().toLowerCase();
+  final title = resolveAgentToolTitle(cardData);
+  if (status != 'running' && status != 'pending') {
+    return title;
+  }
+
+  final toolType = (cardData['toolType'] ?? '').toString().trim().toLowerCase();
+  final toolName = (cardData['toolName'] ?? '').toString().trim().toLowerCase();
+  if (toolType != 'file' &&
+      !toolName.contains('file_write') &&
+      !toolName.contains('file_edit') &&
+      !toolName.endsWith('/write') &&
+      !toolName.endsWith('/edit')) {
+    return title;
+  }
+
+  final titleLower = title.toLowerCase();
+  final isWrite = toolName.contains('write') ||
+      titleLower.contains('写入') ||
+      titleLower.contains('write');
+  final isEdit = toolName.contains('edit') ||
+      toolName.contains('patch') ||
+      titleLower.contains('编辑') ||
+      titleLower.contains('修改') ||
+      titleLower.contains('edit');
+  final action = isWrite
+      ? (isEnglish ? 'Writing file' : '正在写入文件')
+      : isEdit
+      ? (isEnglish ? 'Editing file' : '正在编辑文件')
+      : title;
+  if (action == title) {
+    return action;
+  }
+
+  final fileName = _agentToolFileName(cardData);
+  final actionWithTarget = fileName.isEmpty
+      ? action
+      : '$action${isEnglish ? ': ' : '：'}$fileName';
+  if (status == 'pending') {
+    return isEnglish
+        ? 'Waiting for confirmation: $actionWithTarget'
+        : '等待确认：$actionWithTarget';
+  }
+  return actionWithTarget;
+}
+
+String _agentToolFileName(Map<String, dynamic> cardData) {
+  final directPath = (cardData['filePath'] ?? '').toString().trim();
+  final argsJson = (cardData['argsJson'] ?? '').toString().trim();
+  dynamic decoded;
+  if (argsJson.isNotEmpty) {
+    try {
+      decoded = jsonDecode(argsJson);
+    } catch (_) {
+      decoded = null;
+    }
+  }
+  final args = decoded is Map ? Map<String, dynamic>.from(decoded) : null;
+  final path = directPath.isNotEmpty
+      ? directPath
+      : (args?['path'] ??
+              args?['filePath'] ??
+              args?['file_path'] ??
+              args?['filename'] ??
+              args?['fileName'])
+          ?.toString()
+          .trim() ??
+      '';
+  if (path.isEmpty) {
+    return '';
+  }
+  final normalized = path.replaceAll('\\', '/');
+  final segments = normalized.split('/').where((part) => part.isNotEmpty);
+  return segments.isEmpty ? normalized : segments.last;
+}
+
 String resolveAgentToolTerminalOutput(Map<String, dynamic> cardData) {
   return TerminalOutputUtils.buildDisplayOutput(
     terminalOutput: (cardData['terminalOutput'] ?? '').toString(),

@@ -10,6 +10,7 @@ import cn.com.omnimind.baselib.llm.ModelProviderConfigStore
 import cn.com.omnimind.baselib.llm.ModelProviderProfile
 import cn.com.omnimind.baselib.llm.PlatformAiProvisioner
 import cn.com.omnimind.baselib.llm.ProviderModelOption
+import cn.com.omnimind.baselib.llm.ReasoningEffort
 import cn.com.omnimind.baselib.llm.SceneModelBindingEntry
 import cn.com.omnimind.baselib.llm.SceneModelBindingStore
 import cn.com.omnimind.bot.BuildConfig
@@ -18,6 +19,8 @@ import cn.com.omnimind.bot.agent.AgentConversationModePolicy
 import cn.com.omnimind.bot.agent.AgentModelOverride
 import cn.com.omnimind.bot.agent.AgentResult
 import cn.com.omnimind.bot.agent.AgentRuntimeContextRepository
+import cn.com.omnimind.bot.agent.AgentRuntimeSettingsStore
+import cn.com.omnimind.bot.agent.AgentRuntimeSettings
 import cn.com.omnimind.bot.agent.AgentScheduleToolBridge
 import cn.com.omnimind.bot.agent.NoOpAgentRunControl
 import cn.com.omnimind.bot.agent.OmniAgentExecutor
@@ -74,6 +77,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonNull
@@ -665,14 +669,15 @@ private class XiaowanAgentSession(
         content: List<ContentBlock>,
         _meta: JsonElement?,
     ): Flow<Event> = channelFlow {
-        val promptJob = coroutineContext[Job]
+        var promptJob: Job? = null
         try {
             promptMutex.withLock {
-        // The cancellation handle belongs to the prompt that owns the
-        // session mutex. Assigning it before acquiring the mutex lets a
-        // queued second prompt overwrite the first prompt's handle; a stop
-        // request would then cancel the waiter instead of the running turn.
-        activePromptJob = promptJob
+        // Keep the flow producer alive while the prompt worker is cancelled.
+        // The ACP session/cancel callback must be able to receive the official
+        // PromptResponse(CANCELLED) instead of cancelling this channelFlow
+        // producer and leaking JobCancellationException into the dispatcher.
+        val worker = launch {
+            try {
         val rawPromptParts = buildXiaowanPromptParts(content)
         // ACP owns the prompt boundary. Materialize image content here so the
         // Agent always has a stable workspace path, while the provider policy
@@ -692,7 +697,6 @@ private class XiaowanAgentSession(
         }
         val conversationId = conversationIdProvider(sessionId.value)
         val streamBridge = XiaowanAcpEventBridge(
-            canContinue = conversationId != null,
         ) { update ->
             // AgentCallback can arrive from provider/tool worker coroutines.
             // `flow { emit(...) }` is not thread-safe and drops the whole turn
@@ -743,6 +747,17 @@ private class XiaowanAgentSession(
                 ?.content
         )
         val terminalEnvironment = xiaowanTerminalEnvironmentFromMeta(_meta)
+        val runtimeSettings = (_meta as? JsonObject)
+            ?.get("runtimeSettings")
+            ?.let { element ->
+                runCatching {
+                    AgentRuntimeSettings.fromJson(element.toString())
+                }.getOrNull()
+            }
+            ?: AgentRuntimeSettingsStore.read(
+                context,
+                AcpAgentProfileStore.XIAOWAN_AGENT_ID,
+            )
         val result = executor.processUserMessage(
             userMessage = text,
             conversationHistory = emptyList(),
@@ -752,6 +767,7 @@ private class XiaowanAgentSession(
             conversationMode = conversationMode,
             modelOverride = selectedModelOverride(),
             reasoningEffort = reasoningEffort,
+            runtimeSettings = runtimeSettings,
             terminalEnvironment = terminalEnvironment,
             callback = streamBridge,
             runControl = NoOpAgentRunControl,
@@ -761,6 +777,14 @@ private class XiaowanAgentSession(
             },
             historyMessagesOverride = messages.toList().takeIf { conversationId == null },
         )
+        if (result is AgentResult.Error && result.exception is CancellationException) {
+            send(
+                Event.PromptResponseEvent(
+                    PromptResponse(stopReason = StopReason.CANCELLED)
+                )
+            )
+            return@launch
+        }
         val answer = when (result) {
             is AgentResult.Success -> {
                 val response = result.response.content
@@ -794,7 +818,25 @@ private class XiaowanAgentSession(
                 )
             )
         )
+            } catch (_: CancellationException) {
+                // Cancellation is the official ACP prompt terminal. Keep the
+                // flow alive long enough to deliver it to the ClientSession.
+                runCatching {
+                    send(
+                        Event.PromptResponseEvent(
+                            PromptResponse(stopReason = StopReason.CANCELLED)
+                        )
+                    )
+                }
+            }
         }
+        // The cancellation handle belongs to the prompt that owns the
+        // session mutex. It points at the worker, not the channelFlow producer,
+        // so cancelling a turn cannot abort the ACP protocol dispatcher.
+        promptJob = worker
+        activePromptJob = worker
+        worker.join()
+            }
         } finally {
             if (activePromptJob === promptJob) {
                 activePromptJob = null
@@ -803,7 +845,13 @@ private class XiaowanAgentSession(
     }
 
     override suspend fun cancel() {
-        activePromptJob?.cancel(CancellationException("ACP session turn cancelled"))
+        // session/cancel is handled by the ACP protocol dispatcher. Cancel the
+        // prompt job without injecting a custom exception into that dispatcher:
+        // the prompt collector observes normal coroutine cancellation and
+        // projects the official cancel result through the existing lifecycle.
+        // Propagating a CancellationException from this callback can abort the
+        // Android process while the JSON-RPC request is being handled.
+        activePromptJob?.cancel()
     }
 
     /**
@@ -878,17 +926,20 @@ internal fun AgentResult.Success.toAcpUsage(): Usage? {
  * an Android Agent session.
  */
 internal fun normalizeXiaowanReasoningEffort(value: String?): String? {
-    return when (value?.trim()?.lowercase()) {
+    val raw = value?.trim()
+    if (raw.isNullOrEmpty()) {
         // The Provider's default may enable deep thinking even for a
         // one-word greeting. ACP effort is optional, so Xiaowan follows
         // its request factory and keeps thinking opt-in rather than
         // turning every ordinary Agent turn into a long deliberation.
-        null, "" -> XiaowanChatCompletionRequestFactory.DEFAULT_REASONING_EFFORT
-        "no", "none", "off" -> "none"
-        "min", "minimal", "minimum", "low" -> "low"
-        "med", "medium" -> "medium"
-        "high", "extra_high", "extra-high", "very_high", "very-high",
-        "x-high", "x high", "xhigh", "max" -> "high"
+        return XiaowanChatCompletionRequestFactory.DEFAULT_REASONING_EFFORT
+    }
+    return when (ReasoningEffort.normalize(raw)) {
+        ReasoningEffort.NONE -> ReasoningEffort.NONE
+        ReasoningEffort.LOW -> ReasoningEffort.LOW
+        ReasoningEffort.MEDIUM -> ReasoningEffort.MEDIUM
+        ReasoningEffort.HIGH, ReasoningEffort.XHIGH, ReasoningEffort.MAX ->
+            ReasoningEffort.HIGH
         else -> null
     }
 }
@@ -1068,7 +1119,6 @@ internal fun xiaowanTerminalEnvironmentFromMeta(
 }
 
 internal class XiaowanAcpEventBridge(
-    private val canContinue: Boolean = false,
     private val emitUpdate: suspend (SessionUpdate) -> Unit,
 ) : AgentCallback {
     private val callbackMutex = Mutex()
@@ -1430,11 +1480,7 @@ internal class XiaowanAcpEventBridge(
                 toolCallId = ToolCallId(resolvedToolCallId),
                 title = xiaowanToolTitle(toolName),
                 kind = xiaowanToolKind(toolName, toolTypesById[resolvedToolCallId]),
-                status = if (result is ToolExecutionResult.Clarify) {
-                    // ACP's standard pending state covers a tool waiting for
-                    // approval/input. Do not encode that state in rawOutput.
-                    ToolCallStatus.PENDING
-                } else if (toolResultSucceeded(result)) {
+                status = if (toolResultSucceeded(result)) {
                     ToolCallStatus.COMPLETED
                 } else {
                     ToolCallStatus.FAILED
@@ -1634,27 +1680,19 @@ internal class XiaowanAcpEventBridge(
     }
     override suspend fun onError(error: String, retryable: Boolean) {
         callbackMutex.withLock {
-            // Preserve the old Xiaowan behavior on the ACP path: a failed
-            // turn with visible partial output remains one assistant entry
-            // and exposes the Continue action through shared recovery
-            // metadata. Do not create a second error bubble or throw away the
-            // partial Markdown stream.
-            val hasPartialOutput = assistantSnapshot.isNotBlank()
-            val continueable = canContinue && hasPartialOutput
+            // Preserve partial output as failed output. ACP has no
+            // client-side approximate-resume operation: a new prompt is a new
+            // turn, so partial text must not create a Continue action.
             val recoveryMeta = acpPresentationMeta(
                 "recovery" to mapOf(
                     "error" to error,
                     "retryable" to retryable,
-                    "continueable" to continueable,
-                    "continueResumeMode" to if (continueable) "approximate" else null,
                     "willRetry" to false,
-                    "persistAsError" to !hasPartialOutput,
-                    "retryCount" to if (retryable) 3 else 0,
-                    "maxRetries" to 3,
+                    "persistAsError" to true,
                     "errorText" to error,
                 )
             )
-            if (hasPartialOutput) {
+            if (assistantSnapshot.isNotBlank()) {
                 emitAssistantStatus(recoveryMeta)
             } else {
                 emitAssistantNotice(error, recoveryMeta)
@@ -1747,8 +1785,8 @@ private fun toolResultSucceeded(result: ToolExecutionResult): Boolean = when (re
     is ToolExecutionResult.McpResult -> result.success
     is ToolExecutionResult.MemoryResult -> result.success
     is ToolExecutionResult.ContextResult -> result.success
-    is ToolExecutionResult.ChatMessage,
-    is ToolExecutionResult.Clarify -> true
+    is ToolExecutionResult.ChatMessage -> true
+    is ToolExecutionResult.Clarify -> false
 }
 
 private fun toolResultText(result: ToolExecutionResult): String = when (result) {

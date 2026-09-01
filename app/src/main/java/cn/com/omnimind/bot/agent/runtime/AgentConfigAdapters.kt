@@ -1,7 +1,9 @@
 package cn.com.omnimind.bot.agent.runtime
 
 import cn.com.omnimind.baselib.llm.ProviderModelOption
+import cn.com.omnimind.baselib.llm.DeepSeekProvider
 import cn.com.omnimind.baselib.llm.OpenAiWireApi
+import cn.com.omnimind.baselib.llm.ProviderCustomHeaderUtils
 import com.google.gson.GsonBuilder
 import com.google.gson.JsonArray
 import com.google.gson.JsonNull
@@ -34,12 +36,9 @@ internal fun AgentProviderCredentials.normalized(): AgentProviderCredentials {
     require(!normalizedBaseUrl.any(Char::isWhitespace)) {
         "Provider base URL contains whitespace."
     }
-    val normalizedHeaders = customHeaders
-        .mapNotNull { (key, value) ->
-            val normalizedKey = key.trim()
-            if (normalizedKey.isEmpty()) null else normalizedKey to value.trim()
-        }
-        .toMap()
+    val normalizedHeaders = ProviderCustomHeaderUtils
+        .sanitizeCustomHeaders(customHeaders)
+        .mapValues { (_, value) -> value.trim() }
     return copy(
         baseUrl = normalizedBaseUrl,
         apiKey = apiKey.trim(),
@@ -53,8 +52,6 @@ internal data class AgentProviderMappingInput(
     val agentId: String,
     val provider: AgentProviderCredentials?,
     val model: String?,
-    /** ACP/Web request-level thinking selection, when the caller supplied one. */
-    val reasoningEffort: String? = null,
     val harnessAdapter: AcpHarnessAdapter = AcpHarnessAdapters.standard,
     val deepSeekConfig: DeepSeekHarnessConfig = DeepSeekHarnessConfig(),
 )
@@ -71,6 +68,8 @@ internal data class AgentProviderMapping(
     /** Optional Harness-owned config file read before launch. */
     val launchConfigPath: String? = null,
     val launchConfigExecutorKey: String? = null,
+    /** Official Codex env_http_headers bindings for Provider custom headers. */
+    val codexEnvHttpHeaders: Map<String, String> = emptyMap(),
 )
 
 internal data class AgentConfigWrite(
@@ -78,6 +77,47 @@ internal data class AgentConfigWrite(
     val content: String,
     val executorKey: String,
 )
+
+/**
+ * Merge user launch options with the canonical Provider mapping.
+ *
+ * Provider credentials/model/protocol values are owned by the shared
+ * Provider. Profile environment values may add Harness-specific options, but
+ * must not shadow those canonical values with stale settings from an older
+ * Agent configuration.
+ */
+internal fun mergeAcpLaunchEnvironment(
+    profileEnvironment: Map<String, String>,
+    providerEnvironment: Map<String, String>,
+): Map<String, String> = buildMap {
+    profileEnvironment.forEach { (key, value) ->
+        if (key !in PROVIDER_OWNED_ENVIRONMENT_KEYS &&
+            !key.startsWith(PROVIDER_HEADER_ENV_PREFIX)
+        ) {
+            put(key, value)
+        }
+    }
+    putAll(providerEnvironment)
+}
+
+/**
+ * Provider credentials and model selection are never profile configuration.
+ * Remove these keys even when the current Provider is absent, otherwise a
+ * stale persisted profile can silently resurrect an old route or credential.
+ */
+private val PROVIDER_OWNED_ENVIRONMENT_KEYS = setOf(
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_SMALL_FAST_MODEL",
+    "DEEPSEEK_API_KEY",
+    "DEEPSEEK_BASE_URL",
+    "DSH_MODEL",
+)
+private const val PROVIDER_HEADER_ENV_PREFIX = "OMNIBOT_PROVIDER_HEADER_"
 
 internal interface AgentConfigAdapter {
     fun map(input: AgentProviderMappingInput): AgentProviderMapping
@@ -95,8 +135,7 @@ internal object AgentConfigAdapterRegistry {
         DeepSeekHarnessConfigAdapter,
         CodexConfigAdapter,
         ClaudeCodeConfigAdapter,
-        OpenCodeConfigAdapter,
-        KimiCodeConfigAdapter,
+        OpenCodeConfigAdapter
     )
 
     fun map(input: AgentProviderMappingInput): AgentProviderMapping {
@@ -134,8 +173,6 @@ internal object AgentConfigAdapterRegistry {
             AcpHarnessProviderConfigKind.OPEN_CODE ->
                 this === OpenCodeConfigAdapter
             AcpHarnessProviderConfigKind.STANDARD -> false
-            AcpHarnessProviderConfigKind.KIMI_CODE ->
-                this === KimiCodeConfigAdapter
         }
     }
 }
@@ -143,7 +180,6 @@ internal object AgentConfigAdapterRegistry {
 private fun AgentProviderMappingInput.normalized(): AgentProviderMappingInput = copy(
     provider = provider?.normalized(),
     model = model?.trim()?.takeIf { it.isNotEmpty() },
-    reasoningEffort = reasoningEffort?.trim()?.takeIf { it.isNotEmpty() },
 )
 
 private object DeepSeekHarnessConfigAdapter : AgentConfigAdapter {
@@ -166,10 +202,6 @@ private object DeepSeekHarnessConfigAdapter : AgentConfigAdapter {
         existingConfig: String,
     ): List<AgentConfigWrite> {
         val model = input.model?.trim()?.takeIf { it.isNotEmpty() } ?: return emptyList()
-        // DSH's official DeepSeek adapter defaults to 256K output tokens. Many
-        // OpenAI-compatible gateways (including the active GLM route) cap the
-        // request at 131072, so publish a normal user-settings override through
-        // DSH's documented hot-reload surface instead of patching vendor code.
         return listOf(
             AgentConfigWrite(
                 path = DEEPSEEK_HARNESS_SETTINGS_PATH,
@@ -182,15 +214,14 @@ private object DeepSeekHarnessConfigAdapter : AgentConfigAdapter {
 
 private fun buildDeepSeekHarnessSettingsYaml(model: String): String = buildString {
     appendLine("llm-deepseek:")
-    appendLine("  maxTokens: 8192")
     appendLine("  models:")
     appendLine("    - id: '${model.replace("'", "''")}'")
-    appendLine("      maxTokens: 8192")
 }
 
 private object CodexConfigAdapter : AgentConfigAdapter {
     override fun map(input: AgentProviderMappingInput): AgentProviderMapping {
         val provider = input.provider
+        val headerBindings = provider?.let { buildAcpHeaderBindings(it.customHeaders) }
         val environment = if (provider == null) {
             mapOf("CODEX_HOME" to AgentRuntimeDefaults.CODEX_HOME)
         } else {
@@ -198,7 +229,7 @@ private object CodexConfigAdapter : AgentConfigAdapter {
                 "CODEX_HOME" to AgentRuntimeDefaults.CODEX_HOME,
                 "OPENAI_BASE_URL" to normalizeCodexBaseUrl(provider.baseUrl),
                 "OPENAI_API_KEY" to provider.apiKey
-            )
+            ) + headerBindings?.environment.orEmpty()
         }
         return AgentProviderMapping(
             environment = environment,
@@ -209,7 +240,8 @@ private object CodexConfigAdapter : AgentConfigAdapter {
             // and DSH, but Codex must receive its own official Responses
             // transport setting.
             codexWireApi = provider?.let { OpenAiWireApi.RESPONSES },
-            codexBaseUrl = provider?.baseUrl?.let(::normalizeCodexBaseUrl)
+            codexBaseUrl = provider?.baseUrl?.let(::normalizeCodexBaseUrl),
+            codexEnvHttpHeaders = headerBindings?.envHttpHeaders.orEmpty(),
         )
     }
 
@@ -229,6 +261,7 @@ private object CodexConfigAdapter : AgentConfigAdapter {
                     model = model,
                     wireApi = mapping.codexWireApi ?: OpenAiWireApi.RESPONSES,
                     modelCatalogPath = CODEX_MODEL_CATALOG_JSON_PATH,
+                    envHttpHeaders = mapping.codexEnvHttpHeaders,
                 ),
                 executorKey = "codex-agent-config-write",
             ),
@@ -250,11 +283,26 @@ private object ClaudeCodeConfigAdapter : AgentConfigAdapter {
     override fun map(input: AgentProviderMappingInput): AgentProviderMapping {
         val provider = input.provider ?: return AgentProviderMapping()
         val model = input.model?.trim()?.takeIf { it.isNotEmpty() }
+        val anthropicBaseUrl = normalizeClaudeCodeBaseUrl(provider.baseUrl)
+        val customHeaders = provider.customHeaders
+            .entries
+            .joinToString("\n") { (name, value) -> "$name: $value" }
+        require(
+            provider.protocolType.equals("anthropic", ignoreCase = true) ||
+                isAnthropicCompatibleBaseUrl(anthropicBaseUrl)
+        ) {
+            "Claude Code requires an Anthropic-compatible Provider endpoint. " +
+                "Configure the Provider protocol as Anthropic or use its /anthropic endpoint; " +
+                "the current endpoint is OpenAI-compatible: ${provider.baseUrl}"
+        }
         return AgentProviderMapping(
             environment = buildMap {
-                put("ANTHROPIC_BASE_URL", normalizeClaudeCodeBaseUrl(provider.baseUrl))
+                put("ANTHROPIC_BASE_URL", anthropicBaseUrl)
                 put("ANTHROPIC_API_KEY", provider.apiKey)
                 put("ANTHROPIC_AUTH_TOKEN", provider.apiKey)
+                if (customHeaders.isNotBlank()) {
+                    put("ANTHROPIC_CUSTOM_HEADERS", customHeaders)
+                }
                 if (model != null) {
                     // Official Claude Code model override. Without this the
                     // CLI falls back to claude-opus and a shared gateway can
@@ -267,15 +315,21 @@ private object ClaudeCodeConfigAdapter : AgentConfigAdapter {
     }
 }
 
+private fun isAnthropicCompatibleBaseUrl(value: String): Boolean {
+    return value.endsWith("/anthropic", ignoreCase = true) ||
+        value.endsWith("/apps/anthropic", ignoreCase = true)
+}
+
 private object OpenCodeConfigAdapter : AgentConfigAdapter {
     override fun map(input: AgentProviderMappingInput): AgentProviderMapping {
         val provider = input.provider ?: return AgentProviderMapping()
         val model = input.model?.trim()?.takeIf { it.isNotEmpty() }
+        val headerBindings = buildAcpHeaderBindings(provider.customHeaders)
         return AgentProviderMapping(
             environment = mapOf(
                 "OPENAI_BASE_URL" to normalizeOpenCodeBaseUrl(provider.baseUrl),
                 "OPENAI_API_KEY" to provider.apiKey
-            ),
+            ) + headerBindings.environment,
             openCodeModel = model?.let { "$OPEN_CODE_PROVIDER_ID/$it" },
             openCodeBaseUrl = normalizeOpenCodeBaseUrl(provider.baseUrl),
             launchConfigPath = OPENCODE_CONFIG_PATH,
@@ -298,233 +352,12 @@ private object OpenCodeConfigAdapter : AgentConfigAdapter {
                     model = model,
                     baseUrl = mapping.openCodeBaseUrl ?: provider.baseUrl,
                     existingConfigJson = existingConfig,
+                    customHeaders = provider.customHeaders,
                 ),
                 executorKey = "opencode-agent-config-write",
             )
         )
     }
-}
-
-private object KimiCodeConfigAdapter : AgentConfigAdapter {
-    override fun map(input: AgentProviderMappingInput): AgentProviderMapping {
-        return AgentProviderMapping(
-            environment = buildKimiCodeModelEnvironment(
-                provider = input.provider,
-                model = input.model,
-                reasoningEffort = input.reasoningEffort,
-            ),
-            launchConfigPath = input.reasoningEffort
-                ?.trim()
-                ?.takeIf { it.isNotEmpty() }
-                ?.let { KIMI_CODE_CONFIG_PATH },
-            launchConfigExecutorKey = input.reasoningEffort
-                ?.trim()
-                ?.takeIf { it.isNotEmpty() }
-                ?.let { "kimi-code-config-read" },
-        )
-    }
-
-    override fun launchConfigWrites(
-        input: AgentProviderMappingInput,
-        mapping: AgentProviderMapping,
-        providerModels: List<ProviderModelOption>,
-        existingConfig: String,
-    ): List<AgentConfigWrite> {
-        // KIMI_MODEL_THINKING_EFFORT is intentionally limited to Kimi's
-        // native provider by Kimi Code.  A shared custom Provider is exposed
-        // as OpenAI-compatible, so its concrete effort must be written to
-        // the documented global [thinking] section instead.
-        val effort = input.reasoningEffort?.trim()?.takeIf { it.isNotEmpty() }
-            ?: return emptyList()
-        return listOf(
-            AgentConfigWrite(
-                path = KIMI_CODE_CONFIG_PATH,
-                content = buildKimiCodeThinkingConfigToml(
-                    existingConfig = existingConfig,
-                    reasoningEffort = effort,
-                ),
-                executorKey = "kimi-code-config-write",
-            ),
-        )
-    }
-}
-
-/**
- * Kimi's documented KIMI_MODEL_* channel creates an in-memory provider/model
- * for one process. Use it for both ACP and Web so the shared Dispatch
- * Provider remains the source of truth without writing an API key into
- * Kimi's own config.toml.
- */
-internal fun buildKimiCodeModelEnvironment(
-    provider: AgentProviderCredentials?,
-    model: String?,
-    reasoningEffort: String? = null,
-): Map<String, String> {
-    val credentials = requireNotNull(provider) {
-        "Dispatch Model Provider is required for Kimi Code."
-    }.normalized()
-    val modelId = model?.trim().orEmpty()
-    require(modelId.isNotEmpty()) {
-        "Dispatch Model is required for Kimi Code."
-    }
-
-    val protocol = credentials.protocolType.trim().lowercase()
-    val host = runCatching {
-        java.net.URI(credentials.baseUrl).host?.lowercase()
-    }.getOrNull().orEmpty()
-    val providerType = when {
-        protocol == "anthropic" -> "anthropic"
-        host == "api.kimi.com" ||
-            host == "api.moonshot.ai" ||
-            host == "api.moonshot.cn" -> "kimi"
-        else -> "openai"
-    }
-    val baseUrl = if (providerType == "anthropic") {
-        credentials.baseUrl
-    } else {
-        normalizeKimiCodeBaseUrl(credentials.baseUrl)
-    }
-    return linkedMapOf(
-        "KIMI_CODE_HOME" to KIMI_CODE_HOME,
-        "KIMI_CODE_NO_AUTO_UPDATE" to "1",
-        "KIMI_MODEL_NAME" to modelId,
-        "KIMI_MODEL_API_KEY" to credentials.apiKey,
-        "KIMI_MODEL_BASE_URL" to baseUrl,
-        "KIMI_MODEL_PROVIDER_TYPE" to providerType,
-        // The synthetic model defaults to these capabilities, but publishing
-        // them explicitly prevents a stale Kimi home/config from hiding the
-        // Thinking option after a Provider switch.
-        "KIMI_MODEL_CAPABILITIES" to "image_in,thinking",
-    ).apply {
-        val normalizedEffort = normalizeKimiCodeThinkingEffort(reasoningEffort)
-        if (
-            providerType == "kimi" &&
-            normalizedEffort != null &&
-            normalizedEffort != "off" &&
-            normalizedEffort != "on" &&
-            normalizedEffort in KIMI_CODE_THINKING_EFFORTS
-        ) {
-            // Kimi's native trait consumes this forced value. Do not send it
-            // for custom OpenAI-compatible/Anthropic routes: Kimi Code's
-            // generic providers use the [thinking] config instead.
-            put("KIMI_MODEL_THINKING_EFFORT", normalizedEffort)
-        }
-        if (credentials.customHeaders.isNotEmpty()) {
-            put(
-                "KIMI_CODE_CUSTOM_HEADERS",
-                credentials.customHeaders.entries.joinToString("\n") { (key, value) ->
-                    "$key: $value"
-                },
-            )
-        }
-    }
-}
-
-internal const val KIMI_CODE_HOME = "/root/.kimi-code/omnibot"
-internal const val KIMI_CODE_CONFIG_PATH = "$KIMI_CODE_HOME/config.toml"
-
-private val KIMI_CODE_THINKING_EFFORTS = setOf(
-    "low",
-    "medium",
-    "high",
-    "xhigh",
-    "max",
-)
-
-/** Normalize common UI aliases while preserving provider-specific levels. */
-internal fun normalizeKimiCodeThinkingEffort(value: String?): String? {
-    val normalized = value?.trim()?.lowercase()?.replace('_', '-')
-        ?.takeIf { it.isNotEmpty() }
-        ?: return null
-    return when (normalized) {
-        "no", "none", "off" -> "off"
-        "on" -> "on"
-        "minimal", "min" -> "minimal"
-        "med" -> "medium"
-        "extra-high", "very-high", "x-high" -> "xhigh"
-        else -> normalized
-    }
-}
-
-/**
- * Update only Kimi Code's documented [thinking] table, preserving the rest of
- * the app-owned Kimi config (MCP, permissions, and user settings).
- */
-internal fun buildKimiCodeThinkingConfigToml(
-    existingConfig: String,
-    reasoningEffort: String?,
-): String {
-    val normalized = normalizeKimiCodeThinkingEffort(reasoningEffort)
-        ?: return existingConfig
-    val enabled = normalized != "off"
-    val lines = existingConfig.replace("\r\n", "\n").split('\n').toMutableList()
-    val sectionHeader = Regex("^\\s*\\[thinking]\\s*$")
-    val anySectionHeader = Regex("^\\s*\\[\\[?[^]]+]\\]\\]?\\s*$")
-    val sectionStart = lines.indexOfFirst { sectionHeader.matches(it) }
-    val sectionEnd = if (sectionStart >= 0) {
-        (sectionStart + 1 until lines.size)
-            .firstOrNull { anySectionHeader.matches(lines[it]) }
-            ?: lines.size
-    } else {
-        -1
-    }
-
-    fun updateKey(start: Int, endExclusive: Int, key: String, value: String): Boolean {
-        val keyRegex = Regex("^\\s*${Regex.escape(key)}\\s*=")
-        val existingIndex = (start + 1 until endExclusive)
-            .firstOrNull { keyRegex.containsMatchIn(lines[it]) }
-        if (existingIndex != null) {
-            lines[existingIndex] = "$key = $value"
-            return false
-        } else {
-            lines.add(endExclusive.coerceAtMost(lines.size), "$key = $value")
-            return true
-        }
-    }
-
-    fun removeKey(start: Int, endExclusive: Int, key: String) {
-        val keyRegex = Regex("^\\s*${Regex.escape(key)}\\s*=")
-        for (index in endExclusive - 1 downTo start + 1) {
-            if (keyRegex.containsMatchIn(lines[index])) lines.removeAt(index)
-        }
-    }
-
-    if (sectionStart < 0) {
-        while (lines.lastOrNull()?.isBlank() == true) lines.removeAt(lines.lastIndex)
-        if (lines.isNotEmpty()) lines += ""
-        lines += "[thinking]"
-        lines += "enabled = $enabled"
-        if (enabled && normalized != "on") {
-            lines += "effort = \"$normalized\""
-        }
-    } else {
-        var end = sectionEnd
-        if (updateKey(sectionStart, end, "enabled", enabled.toString())) end += 1
-        if (enabled && normalized != "on") {
-            updateKey(sectionStart, end, "effort", "\"$normalized\"")
-        } else {
-            removeKey(sectionStart, end, "effort")
-        }
-    }
-    return lines.joinToString("\n").trimEnd() + "\n"
-}
-
-/** Kimi expects an API root, while legacy Provider entries may store an endpoint. */
-internal fun normalizeKimiCodeBaseUrl(baseUrl: String): String {
-    var normalized = baseUrl.trim().trimEnd('/')
-    listOf(
-        "/v1/chat/completions",
-        "/chat/completions",
-        "/v1/responses",
-        "/responses",
-    ).firstOrNull { normalized.endsWith(it, ignoreCase = true) }?.let {
-        normalized = normalized.dropLast(it.length).trimEnd('/')
-    }
-    if (normalized.isEmpty() || normalized.endsWith("#")) return normalized
-    if (normalized.endsWith("/v1") || normalized.endsWith("/compatible-mode/v1")) {
-        return normalized
-    }
-    return "$normalized/v1"
 }
 
 internal fun syncAgentProviderCredentials(
@@ -776,6 +609,35 @@ internal fun buildSharedAgentProviderEnvironment(
     ).environment
 }
 
+/**
+ * Exposes editable Provider headers to official Harnesses without copying
+ * secret values into their durable config files. The generated variable names
+ * are stable for one ordered header map and are consumed only by official
+ * configuration fields such as Codex `env_http_headers` and OpenCode's
+ * `{env:...}` header references.
+ */
+internal data class AcpHeaderBindings(
+    val environment: Map<String, String>,
+    val envHttpHeaders: Map<String, String>,
+)
+
+internal fun buildAcpHeaderBindings(
+    headers: Map<String, String>,
+): AcpHeaderBindings {
+    val sanitized = ProviderCustomHeaderUtils.sanitizeCustomHeaders(headers)
+    val environment = linkedMapOf<String, String>()
+    val envHttpHeaders = linkedMapOf<String, String>()
+    sanitized.entries.forEachIndexed { index, (name, value) ->
+        val envName = "$PROVIDER_HEADER_ENV_PREFIX$index"
+        environment[envName] = value
+        envHttpHeaders[name] = envName
+    }
+    return AcpHeaderBindings(
+        environment = environment,
+        envHttpHeaders = envHttpHeaders,
+    )
+}
+
 internal fun normalizeCodexBaseUrl(baseUrl: String): String {
     var normalized = baseUrl.trim().trimEnd('/')
     listOf(
@@ -816,12 +678,11 @@ internal fun normalizeOpenCodeBaseUrl(baseUrl: String): String {
 }
 
 /**
- * Claude Code speaks Anthropic Messages over ACP.  Alibaba Model Studio
- * publishes a separate official Anthropic-compatible endpoint; its normal
- * provider URL is the OpenAI-compatible endpoint used by Codex/OpenCode.
- * Remap only the documented Alibaba endpoints here.  Other providers keep
- * their configured URL untouched because the host cannot infer a compatible
- * protocol from a generic URL.
+ * Claude Code speaks Anthropic Messages over ACP. Some Providers publish a
+ * separate Anthropic-compatible path while their normal Provider URL is the
+ * OpenAI-compatible path used by Xiaowan/Codex/OpenCode. Remap only known
+ * official endpoints; a generic proxy URL must remain untouched because the
+ * host cannot infer its protocol contract.
  */
 internal fun normalizeClaudeCodeBaseUrl(baseUrl: String): String {
     var normalized = baseUrl.trim().trimEnd('/')
@@ -837,13 +698,34 @@ internal fun normalizeClaudeCodeBaseUrl(baseUrl: String): String {
         return normalized
     }
 
+    // DeepSeek publishes separate OpenAI and Anthropic roots on the same
+    // official host. Claude Code must use the documented Anthropic root;
+    // passing the shared OpenAI root makes the model appear unavailable even
+    // though the same Provider/model works through Xiaowan.
+    if (DeepSeekProvider.isOfficialBaseUrl(normalized)) {
+        val uri = java.net.URI(normalized)
+        return "${uri.scheme}://${uri.rawAuthority}/anthropic"
+    }
+
     val host = runCatching {
         java.net.URI(normalized).host?.lowercase()
     }.getOrNull().orEmpty()
+    val isMiniMax = host == "api.minimaxi.com" || host == "api.minimax.io"
     val isAlibabaModelStudio = host == "dashscope.aliyuncs.com" ||
         host == "dashscope-us.aliyuncs.com" ||
         host.endsWith(".dashscope.aliyuncs.com") ||
         host.endsWith(".maas.aliyuncs.com")
+    if (isMiniMax) {
+        return when {
+            normalized.endsWith("/anthropic/v1", ignoreCase = true) ->
+                normalized.dropLast("/v1".length)
+            normalized.endsWith("/anthropic", ignoreCase = true) -> normalized
+            else -> {
+                val uri = java.net.URI(normalized)
+                "${uri.scheme}://${uri.rawAuthority}/anthropic"
+            }
+        }
+    }
     if (!isAlibabaModelStudio) return normalized
 
     val openAiPath = when {

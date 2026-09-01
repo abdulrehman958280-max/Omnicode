@@ -37,7 +37,6 @@ internal enum class AcpHarnessProviderConfigKind {
     CLAUDE_CODE,
     OPEN_CODE,
     DEEPSEEK_HARNESS,
-    KIMI_CODE,
 }
 
 internal interface AcpHarnessAdapter {
@@ -118,18 +117,6 @@ internal object AcpHarnessAdapters {
     val openCode: AcpHarnessAdapter = object : AcpHarnessAdapter {
         override val mcpTransport = AcpHarnessMcpTransport.SESSION_DECLARATION
         override val providerConfigKind = AcpHarnessProviderConfigKind.OPEN_CODE
-    }
-
-    val kimiCode: AcpHarnessAdapter = object : AcpHarnessAdapter {
-        override val mcpTransport = AcpHarnessMcpTransport.SESSION_DECLARATION
-        override val providerConfigKind = AcpHarnessProviderConfigKind.KIMI_CODE
-
-        override fun launchEnvironment(
-            provider: AgentProviderCredentials?,
-            model: String?,
-            rawConfig: String,
-            mcpState: McpServerState,
-        ): Map<String, String> = buildKimiCodeModelEnvironment(provider, model)
     }
 
     val deepSeekHarness: AcpHarnessAdapter = object : AcpHarnessAdapter {
@@ -289,7 +276,6 @@ private const val DEEPSEEK_HARNESS_DEFAULT_MODEL = ""
 // some OpenAI-compatible gateways. Keep the official adapter request within
 // the common 1..131072 range while allowing a user-provided DSH_MAX_TOKENS to
 // override it through the profile environment.
-private const val DEEPSEEK_HARNESS_DEFAULT_MAX_TOKENS = "8192"
 // Keep ordinary prompts responsive. Users can still select `max` explicitly
 // through the official ACP config surface for complex tasks.
 private const val DEEPSEEK_HARNESS_DEFAULT_REASONING_EFFORT = "high"
@@ -301,7 +287,6 @@ private val DEEPSEEK_HARNESS_PERMISSION_MODES = setOf(
     "danger-full-access"
 )
 private const val DEEPSEEK_HARNESS_PERSISTENCE_HOME = "/root/.dsh/omnibot-acp-clean"
-internal const val DEEPSEEK_HARNESS_WEB_HOME = "/root/.dsh/omnibot-web"
 
 internal data class DeepSeekHarnessConfig(
     val baseUrl: String = DEEPSEEK_PUBLIC_BASE_URL,
@@ -314,7 +299,6 @@ internal data class DeepSeekHarnessConfig(
         "DEEPSEEK_BASE_URL" to baseUrl,
         "DEEPSEEK_API_KEY" to apiKey,
         "DSH_MODEL" to model,
-        "DSH_MAX_TOKENS" to DEEPSEEK_HARNESS_DEFAULT_MAX_TOKENS,
         "DSH_REASONING_EFFORT" to reasoningEffort,
         "DSH_PI_AI_REASONING_EFFORT" to reasoningEffort,
         "DSH_THINKING" to if (reasoningEffort == "off") "disabled" else "enabled",
@@ -325,26 +309,6 @@ internal data class DeepSeekHarnessConfig(
         "DSH_PROVIDER" to "deepseek-official",
         "NODE_NO_WARNINGS" to "1"
     )
-}
-
-/**
- * Web owns the built-in `web` profile. Keep its profile/home separate from
- * the headless ACP overlay while reusing the same Dispatch Provider values.
- */
-internal fun buildDeepSeekHarnessWebEnvironment(
-    provider: AgentProviderCredentials?,
-    model: String?,
-): Map<String, String> {
-    val config = syncAgentProviderCredentials(
-        config = DeepSeekHarnessConfig(),
-        sharedProvider = provider,
-        sharedModel = model,
-    )
-    return config.toEnvironment().toMutableMap().apply {
-        remove("DSH_ACP_HOME")
-        put("DSH_HOME", DEEPSEEK_HARNESS_WEB_HOME)
-        put("DSH_SESSION_ROOT", "$DEEPSEEK_HARNESS_WEB_HOME/sessions")
-    }
 }
 
 internal fun parseDeepSeekHarnessConfig(source: String): DeepSeekHarnessConfig {

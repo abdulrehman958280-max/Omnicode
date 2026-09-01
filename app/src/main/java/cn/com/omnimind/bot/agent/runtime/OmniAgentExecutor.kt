@@ -38,29 +38,18 @@ class OmniAgentExecutor(
     )
 
     companion object {
-        /**
-         * Keep a clean native-tool baseline while MCP/plugin discovery is
-         * being measured. The capability implementations remain installed;
-         * this switch only prevents them from entering a normal Agent turn.
-         */
-        private const val EPHEMERAL_CACHE_TYPE = "ephemeral"
         internal const val TIME_CONTEXT_MIN_REFRESH_MILLIS = 60 * 60 * 1000L
         private val timeContextCacheLock = Any()
         @Volatile
         private var timeContextSnapshot: TimeContextSnapshot? = null
 
         internal fun buildCachedSystemPromptContent(prompt: String): JsonElement {
-            return buildJsonArray {
-                add(
-                    buildJsonObject {
-                        put("type", "text")
-                        put("text", prompt)
-                        put("cache_control", buildJsonObject {
-                            put("type", EPHEMERAL_CACHE_TYPE)
-                        })
-                    }
-                )
-            }
+            // ACP delegates provider wire-format ownership to the configured
+            // Provider. An OpenAI-compatible route must receive the standard
+            // string content shape; an unconditional Anthropic-style
+            // cache_control block turns the message into an array and breaks
+            // providers such as LiteLLM that expect strings.
+            return JsonPrimitive(prompt)
         }
 
         internal fun resolveTimeContextSnapshot(
@@ -188,6 +177,7 @@ class OmniAgentExecutor(
         conversationMode: String,
         modelOverride: AgentModelOverride?,
         reasoningEffort: String?,
+        runtimeSettings: AgentRuntimeSettings = AgentRuntimeSettings(),
         terminalEnvironment: Map<String, String>,
         callback: AgentCallback,
         runControl: AgentRunControl = NoOpAgentRunControl,
@@ -289,7 +279,8 @@ class OmniAgentExecutor(
             val llmClient = HttpAgentLlmClient(
                 scope = scope,
                 json = json,
-                modelOverride = modelOverride
+                modelOverride = modelOverride,
+                runtimeSettings = runtimeSettings,
             )
             val toolImageContinuationPolicy = runCatching {
                 AgentToolImageContinuationPolicyResolver.resolve(
@@ -373,6 +364,7 @@ class OmniAgentExecutor(
                         workspaceMemoryService = memoryService,
                         conversationMode = conversationMode,
                         reasoningEffort = reasoningEffort,
+                        runtimeSettings = runtimeSettings,
                         modelProviderProfileId = modelOverride?.providerProfileId,
                         terminalEnvironment = terminalEnvironment,
                         runControl = runControl,

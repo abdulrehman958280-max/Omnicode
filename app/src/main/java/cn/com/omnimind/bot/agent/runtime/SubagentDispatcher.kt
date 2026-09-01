@@ -20,7 +20,7 @@ import kotlinx.serialization.json.JsonPrimitive
  *    ([SubagentToolCatalogView]) so it can only use tools allowed by its profile
  *  - its own [TurnMemoryLoadTracker] so subagent loads don't leak into the
  *    parent's same-turn dedup
- *  - hard caps on rounds (per profile, default 12) and output tokens (4096)
+ *  - the parent runtime owns optional budgets; no implicit round or token cap
  *
  * Parent cancellation propagates naturally through structured concurrency:
  * if the parent's tool call is cancelled, [supervisorScope] tears down every
@@ -93,7 +93,7 @@ class SubagentDispatcher(
         progressReporter: (suspend (SubagentProgressEvent) -> Unit)? = null
     ): List<SubagentRunResult> {
         if (tasks.isEmpty()) return emptyList()
-        val limit = concurrency.coerceIn(1, 6)
+        val limit = concurrency.coerceAtLeast(1)
         val progressSequence = AtomicLong(0)
         emitProgress(
             progressReporter,
@@ -191,9 +191,10 @@ class SubagentDispatcher(
                     conversationId = null,
                     contextCompactor = null,
                     maxModelRounds = spec.budgetRounds
-                        ?.coerceIn(1, profile.maxRounds)
+                        ?: parentEnv.runtimeSettings.maxModelRounds
                         ?: profile.maxRounds,
-                    maxCompletionTokens = profile.maxOutputTokens
+                    maxCompletionTokens = parentEnv.runtimeSettings.maxCompletionTokens
+                        ?: profile.maxOutputTokens,
                 )
             )
             when (result) {

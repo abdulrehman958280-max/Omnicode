@@ -138,17 +138,6 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
     return modelIds;
   }
 
-  ProviderModelOption? _findSharedProviderModelOption(String modelId) {
-    final providerProfileId = _activeDispatchSceneSelection?.providerProfileId;
-    if (providerProfileId == null || providerProfileId.trim().isEmpty) {
-      return null;
-    }
-    return (_modelOptionsByProfileId[providerProfileId] ??
-            const <ProviderModelOption>[])
-        .where((item) => item.id.trim().toLowerCase() == modelId.toLowerCase())
-        .firstOrNull;
-  }
-
   @override
   Future<void> _refreshAgentRuntimeStatus() async {
     if (!mounted || _isAgentRuntimeStatusLoading) return;
@@ -364,52 +353,6 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
         });
       }
       _harnessSwitchSendBarrier.finish(switchGeneration);
-    }
-  }
-
-  @override
-  Future<void> _launchAgentWeb(
-    String agentId, {
-    String? reasoningEffort,
-  }) async {
-    final normalized = agentId.trim();
-    if (normalized.isEmpty) return;
-    try {
-      final response = await AgentRuntimeService.launchAgentWeb(
-        normalized,
-        effort: reasoningEffort ?? _activeAgentReasoningEffort,
-      );
-      if (!mounted) return;
-      final code = response['code']?.toString().trim() ?? '';
-      final packageId = response['packageId']?.toString().trim() ?? '';
-      final displayName = normalized == 'kimi-code-acp'
-          ? 'Kimi Web'
-          : 'DSH Web';
-      switch (code) {
-        case 'OPENED':
-          _showSnackBar('$displayName 已打开');
-          return;
-        case 'RUNTIME_MISSING':
-          if (packageId.isNotEmpty) {
-            GoRouterManager.push(
-              '/home/termux_setting?focus=${Uri.encodeComponent(packageId)}',
-            );
-          }
-          return;
-        case 'PROVIDER_REQUIRED':
-          _showSnackBar('请先配置统一 Dispatch Provider');
-          GoRouterManager.push('/home/agent_mode_setting');
-          return;
-        case 'MODEL_REQUIRED':
-          _showSnackBar('请先选择统一 Dispatch 模型');
-          GoRouterManager.push('/home/agent_mode_setting');
-          return;
-        default:
-          _showSnackBar('$displayName 启动失败');
-      }
-    } catch (error) {
-      if (!mounted) return;
-      _showSnackBar('$agentId Web 启动失败：$error');
     }
   }
 
@@ -831,9 +774,6 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
               )
           ? activeModel
           : preferredModel;
-      final sharedProviderModel = sharedAgent && effectiveModel != null
-          ? _findSharedProviderModelOption(effectiveModel)
-          : null;
       final modelOptions = modelConfigSupported
           ? _mergeAgentOptionIds(
               current: effectiveModel,
@@ -845,23 +785,7 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
         response,
         effectiveModel,
       );
-      // The shared Provider catalog already tells us whether this model is a
-      // reasoning model, but its OpenAI-compatible /models response usually
-      // has no effort list. Kimi Code would otherwise resolve this to the
-      // boolean `on` value and omit `reasoning_effort` on the wire. Use the
-      // interoperable medium level as the default only for catalog-confirmed
-      // reasoning models; users can still choose another advertised effort.
-      final isKimiCodeAgent =
-          _activeAcpAgentId == 'kimi-code-acp' ||
-          _agentRuntimeStatus.activeAgentId == 'kimi-code-acp';
-      final sharedProviderDefaultEffort =
-          isKimiCodeAgent && sharedProviderModel?.reasoning == true
-          ? 'medium'
-          : null;
-      final serverEffort =
-          configSettings.reasoningEffort ??
-          modelDefaultEffort ??
-          sharedProviderDefaultEffort;
+      final serverEffort = configSettings.reasoningEffort ?? modelDefaultEffort;
       final storedPermissionMode = _parseAgentPermissionMode(
         _readAgentPreference(
           _kAgentPermissionModePreferenceKey,
@@ -872,6 +796,8 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
         current: serverEffort,
         options: extractAcpReasoningEffortIds(response),
       );
+      final effortConfigId =
+          extractAcpReasoningEffortConfigId(response) ?? 'reasoning_effort';
       if (!mounted ||
           !isCurrentAgentModelLoad(
             requestId: requestId,
@@ -907,6 +833,7 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
             ? normalizedServerEffort
             : effortOptions.firstOrNull;
         _agentReasoningEffortOptions = effortOptions;
+        _agentReasoningEffortConfigId = effortConfigId;
         _agentModelListError = null;
       });
     } catch (error) {
@@ -1088,6 +1015,7 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
         _activeAgentThreadId = null;
         _activeAgentTurnId = null;
         _activeAgentModelId = null;
+        _agentReasoningEffortConfigId = null;
         _agentModelConfigSupported = false;
         _agentModelOptions = const <String>[];
         _loadedAgentModelSourceKey = null;
@@ -1160,6 +1088,7 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
         _activeAgentModelId = null;
         _agentModelConfigSupported = false;
         _activeAgentReasoningEffort = null;
+        _agentReasoningEffortConfigId = null;
         _activeAgentCollaborationMode = null;
         _agentModelOptions = const <String>[];
         _agentReasoningEffortOptions = const <String>[];
@@ -1187,41 +1116,25 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
   @override
   Future<void> _selectAgentReasoningEffort(String effort) async {
     final normalized = _normalizeAgentReasoningEffort(effort);
-    final isBuiltInXiaowan =
-        _activeAcpAgentId == _kXiaowanAcpAgentId ||
-        _agentRuntimeStatus.activeAgentId == _kXiaowanAcpAgentId;
-    final advertisedOptions = _agentReasoningEffortOptions.isNotEmpty
-        ? _agentReasoningEffortOptions
-        : (isBuiltInXiaowan ? _kAgentReasoningEffortOptions : const <String>[]);
-    final normalizedOptions = advertisedOptions
-        .map(_normalizeAgentReasoningEffort)
-        .whereType<String>()
-        .toSet();
-    if (normalized == null || !normalizedOptions.contains(normalized)) {
+    if (normalized == null ||
+        !_agentReasoningEffortOptions.contains(normalized)) {
       return;
     }
-    // Xiaowan receives the selected effort through the canonical ACP prompt
-    // metadata. It has no mutable Harness-side `reasoning_effort` option, so
-    // attempting session/set_config_option here would make a valid local
-    // selection look like a failed request. Other Harnesses can still apply
-    // their advertised ACP config option immediately.
-    if (!isBuiltInXiaowan) {
-      try {
-        await _setAgentConfigOption(
-          configId: 'reasoning_effort',
-          value: normalized,
+    try {
+      await _setAgentConfigOption(
+        configId: _agentReasoningEffortConfigId ?? 'reasoning_effort',
+        value: normalized,
+      );
+    } catch (error) {
+      if (mounted) {
+        showToast(
+          LegacyTextLocalizer.isEnglish
+              ? 'Failed to change reasoning effort: $error'
+              : '修改思考强度失败：$error',
+          type: ToastType.error,
         );
-      } catch (error) {
-        if (mounted) {
-          showToast(
-            LegacyTextLocalizer.isEnglish
-                ? 'Failed to change reasoning effort: $error'
-                : '修改思考强度失败：$error',
-            type: ToastType.error,
-          );
-        }
-        return;
       }
+      return;
     }
     if (!mounted) return;
     setState(() {
@@ -1271,18 +1184,14 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
     required String configId,
     required dynamic value,
   }) async {
-    // Remote ACP keeps its own connection configuration path. Its turn
-    // The request uses the official ACP session/set_config_option method.
-    // Remote ACP keeps its own connection configuration path.
-    if (_agentRuntimeStatus.runtime == 'remote' ||
-        _agentRuntimeStatus.remoteEnabled) {
-      return;
-    }
+    // Local and remote Agents expose the same official ACP method. The
+    // runtime owns transport selection; this UI boundary must not skip the
+    // remote path or a changed effort would only update local preferences.
     final threadId = _activeAgentThreadId?.trim();
     final conversationId = _modeState(ChatPageMode.agent).currentConversationId;
-    // Before the first turn there is no durable session to mutate. The local
-    // preference is applied once when startThread creates the ACP session.
-    if ((threadId == null || threadId.isEmpty) && conversationId == null) {
+    // Before the first turn there is no durable ACP session to mutate. The
+    // preference is applied once when session/new creates that session.
+    if (threadId == null || threadId.isEmpty) {
       return;
     }
     final agentId = _activeAcpAgentId?.trim();
@@ -1381,19 +1290,6 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
     if (command.isEmpty) {
       return;
     }
-    if ((cardData['controlType'] ?? '').toString() == 'effortSlider') {
-      if (command.startsWith('/')) {
-        _messageController.value = const TextEditingValue(
-          text: '/effort ',
-          selection: TextSelection.collapsed(offset: 8),
-        );
-        _requestComposerFocus();
-        _handleSlashCommandInput();
-      } else {
-        await _selectAgentReasoningEffort(command);
-      }
-      return;
-    }
     if (cardData['acpCommand'] == true) {
       final value = command.endsWith(' ') ? command : '$command ';
       _messageController.value = TextEditingValue(
@@ -1459,14 +1355,6 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
         return true;
       case AgentSlashSubmitKind.selectModel:
         await _selectAgentModel(intent.value ?? '');
-        return true;
-      case AgentSlashSubmitKind.openReasoningEffortPicker:
-        _triggerSlashCommandPanel();
-        return true;
-      case AgentSlashSubmitKind.selectReasoningEffort:
-        await _selectAgentReasoningEffort(intent.value ?? '');
-        _messageController.clear();
-        _hideSlashCommandPanel();
         return true;
       case AgentSlashSubmitKind.startReview:
         _messageController.clear();
@@ -2259,6 +2147,16 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
         _activateRemoteCodexRuntimeForThread(resolvedThreadId);
       }
       final responseTurnId = _asAgentString(response['turnId']);
+      _runtimeCoordinator.applyAcpPromptResponse(
+        conversationId: resolvedConversationId,
+        mode: dispatchModeKey,
+        sessionId: _asAgentString(response['sessionId']) ?? acpSessionId,
+        turnId: responseTurnId,
+        stopReason:
+            _asAgentString(response['stopReason']) ??
+            _asAgentString(response['status']),
+        error: _asAgentString(response['error']),
+      );
       if (isDispatchTargetCurrent()) {
         _activeAgentThreadId = resolvedThreadId ?? acpSessionId;
         _activeAgentTurnId = responseTurnId;
@@ -2298,6 +2196,10 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
         await _writeAgentCommandPreferencesForCurrentConversation();
       }
     } catch (error) {
+      final activeRuntime = _runtimeCoordinator.runtimeFor(
+        conversationId: resolvedConversationId,
+        mode: dispatchModeKey,
+      );
       final shouldShowError =
           isDispatchTargetCurrent() &&
           _runtimeCoordinator.isTaskActive(
@@ -2306,16 +2208,29 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
             mode: dispatchModeKey,
           );
       if (shouldShowError) {
-        handleAgentError(
-          '${dispatchAgentId == _kXiaowanAcpAgentId ? '小万' : _activeAcpAgentDisplayName} 启动失败: '
-          '${formatAgentRuntimeErrorForUser(error)}',
+        if (activeRuntime?.isAiResponding != true) {
+          handleAgentError(
+            '${dispatchAgentId == _kXiaowanAcpAgentId ? '小万' : _activeAcpAgentDisplayName} 启动失败: '
+            '${formatAgentRuntimeErrorForUser(error)}',
+          );
+        }
+      }
+      if (activeRuntime?.isAiResponding == true) {
+        _runtimeCoordinator.applyAcpPromptResponse(
+          conversationId: resolvedConversationId,
+          mode: dispatchModeKey,
+          sessionId: activeRuntime?.activeAcpSessionId ?? _activeAgentThreadId,
+          turnId: activeRuntime?.activeAcpTurnId,
+          stopReason: 'error',
+          error: formatAgentRuntimeErrorForUser(error),
+        );
+      } else {
+        _runtimeCoordinator.unregisterTask(
+          aiMessageId,
+          conversationId: resolvedConversationId,
+          mode: dispatchModeKey,
         );
       }
-      _runtimeCoordinator.unregisterTask(
-        aiMessageId,
-        conversationId: resolvedConversationId,
-        mode: dispatchModeKey,
-      );
     }
   }
 
@@ -2331,11 +2246,22 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
       return;
     }
     try {
-      await AgentRuntimeService.cancelPrompt(
+      final response = await AgentRuntimeService.cancelPrompt(
         conversationId: _isRemoteCodexConfigured() ? null : conversationId,
         sessionId: sessionId,
         promptId: turnId,
       );
+      final runtime = _activeRuntime;
+      if (runtime?.isAiResponding == true && conversationId != null) {
+        _runtimeCoordinator.applyAcpPromptResponse(
+          conversationId: conversationId,
+          mode: kChatRuntimeModeAgent,
+          sessionId: response['sessionId']?.toString() ?? sessionId,
+          turnId: response['turnId']?.toString() ?? turnId,
+          stopReason: 'cancelled',
+          conversation: _modeState(ChatPageMode.agent).currentConversation,
+        );
+      }
     } catch (error) {
       debugPrint('Agent interrupt failed: $error');
     }

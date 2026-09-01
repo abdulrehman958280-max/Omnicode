@@ -5,9 +5,19 @@ import com.agentclientprotocol.model.SessionUpdate
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class XiaowanAcpConnectionTest {
+
+    @Test
+    fun `xiaowan adapter uses canonical reasoning aliases and provider levels`() {
+        assertEquals("none", normalizeXiaowanReasoningEffort("no"))
+        assertEquals("medium", normalizeXiaowanReasoningEffort("MEDIUM"))
+        assertEquals("high", normalizeXiaowanReasoningEffort("xhigh"))
+        assertEquals("high", normalizeXiaowanReasoningEffort("max"))
+        assertNull(normalizeXiaowanReasoningEffort("provider-specific-level"))
+    }
 
     @Test
     fun `explicit reasoning rounds use separate ACP thought messages`() = runBlocking {

@@ -13,6 +13,7 @@ import cn.com.omnimind.baselib.llm.ModelProviderConfigStore
 import cn.com.omnimind.baselib.llm.OmniOfficialProvider
 import cn.com.omnimind.baselib.llm.OpenAiWireApi
 import cn.com.omnimind.baselib.llm.PlatformAiProvisioner
+import cn.com.omnimind.baselib.llm.ProviderCustomHeaderUtils
 import cn.com.omnimind.baselib.llm.ProviderModelOption
 import cn.com.omnimind.baselib.llm.SceneModelBindingStore
 import cn.com.omnimind.baselib.llm.SceneModelBindingEntry
@@ -26,6 +27,8 @@ import cn.com.omnimind.bot.agent.AgentProviderRequestPolicy
 import cn.com.omnimind.bot.agent.AgentWorkspaceAttachmentSupport
 import cn.com.omnimind.bot.agent.AgentWorkspaceManager
 import cn.com.omnimind.bot.agent.AgentScheduleToolBridge
+import cn.com.omnimind.bot.agent.AgentRuntimeSettings
+import cn.com.omnimind.bot.agent.AgentRuntimeSettingsStore
 import cn.com.omnimind.bot.agent.WorkspaceScheduledTaskScheduler
 import cn.com.omnimind.bot.mcp.McpServerManager
 import cn.com.omnimind.bot.terminal.EmbeddedTerminalSetupManager
@@ -49,6 +52,21 @@ import java.util.UUID
 import java.util.ArrayDeque
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
+
+private val HARNESS_CONFIG_UPDATE_KEYS = setOf(
+    "baseUrl",
+    "model",
+    "apiKey",
+    "wireApi",
+    "content",
+    "reasoningEffort",
+    "permissionMode",
+)
+
+internal fun isRuntimeSettingsOnlyAgentConfigUpdate(args: Map<String, Any?>): Boolean {
+    return args.containsKey("runtimeSettings") &&
+        args.keys.none(HARNESS_CONFIG_UPDATE_KEYS::contains)
+}
 
 private const val MAX_PENDING_AGENT_EVENTS = 1024
 
@@ -207,10 +225,6 @@ internal fun standardAcpPermissionToolCallPayload(
     ),
 )
 
-/** Map a host-owned remote terminal status to the shared ACP lifecycle event. */
-internal fun remoteTerminalMethod(status: String): String =
-    if (status == "cancelled") "turn/completed" else "turn/failed"
-
 class AgentRuntimeManager private constructor(
     private val context: Context
 ) {
@@ -237,7 +251,6 @@ class AgentRuntimeManager private constructor(
     private val historyRepository = AgentConversationHistoryRepository(appContext)
     private val remoteConfigStore = CodexRemoteBridgeConfigStore(appContext)
     private val acpAgentProfileStore = AcpAgentProfileStore(appContext)
-    private val agentWebLauncher = AgentWebLauncher(appContext)
     private val scheduledTaskScheduler by lazy {
         WorkspaceScheduledTaskScheduler(appContext)
     }
@@ -379,6 +392,18 @@ class AgentRuntimeManager private constructor(
         }
         releaseTurnRuntime(threadId, turnId)
         return true
+    }
+
+    private suspend fun completeRemotePromptFromResponse(
+        sessionId: String,
+        turnId: String,
+        status: String,
+        error: String? = null,
+    ): Boolean {
+        // The official `session/prompt` response (or its owning request
+        // error) is the terminal ACP boundary. Release host resources here;
+        // the caller projects the returned result through the shared reducer.
+        return clearActiveTurn(sessionId, turnId, terminalStatus = status)
     }
 
     private fun clearActiveTurns() {
@@ -719,9 +744,6 @@ class AgentRuntimeManager private constructor(
         if (method == "agent/config/write") {
             return writeAgentConfig(canonicalArgs)
         }
-        if (method == "agent/web/launch") {
-            return launchAgentWeb(canonicalArgs)
-        }
         if (method.startsWith("agent/")) {
             val requestedAgentId = canonicalArgs.stringValue("agentId")
                 ?: canonicalArgs.mapValue("agent").stringValue("id")
@@ -928,12 +950,30 @@ class AgentRuntimeManager private constructor(
         )
         args["additionalDirectories"]?.let { params["additionalDirectories"] = it }
         args.stringValue("model")?.let { params["model"] = it }
-        args.stringValue("effort")?.let { params["reasoningEffort"] = it }
+        // ACP session/new has no universal reasoning-effort parameter. The
+        // Agent must advertise a thought-level config option, which is then
+        // changed through the official session/set_config_option method.
         val response = request("session/new", params)
         val payload = response as? Map<String, Any?> ?: emptyMap()
         val sessionId = extractThreadId(payload)
             ?: payload.stringValue("id")
             ?: throw IllegalStateException("ACP session/new did not return a session id.")
+        args.stringValue("effort")?.let { requestedEffort ->
+            val configId = resolveAdvertisedReasoningEffortConfigId(
+                payload = payload,
+                requestedEffort = requestedEffort,
+            ) ?: throw IllegalArgumentException(
+                "ACP Agent did not advertise reasoning effort '$requestedEffort'."
+            )
+            request(
+                "session/set_config_option",
+                mapOf(
+                    "sessionId" to sessionId,
+                    "configId" to configId,
+                    "value" to requestedEffort,
+                ),
+            )
+        }
         bindSessionConversation(sessionId, args.longValue("conversationId"))
         return payload.withAcpSessionId().withLocalIds(
             threadId = sessionId,
@@ -1141,6 +1181,11 @@ class AgentRuntimeManager private constructor(
             )
             val payload = response as? Map<String, Any?> ?: emptyMap()
             terminalStatus = terminalStatusFromAcpParams(payload)
+            completeRemotePromptFromResponse(
+                sessionId = sessionId,
+                turnId = turnId,
+                status = terminalStatus,
+            )
             payload.withAcpSessionId().withLocalIds(
                 threadId = sessionId,
                 conversationId = conversationIdForSession(sessionId),
@@ -1159,25 +1204,17 @@ class AgentRuntimeManager private constructor(
             // normal ACP turn/failed notification (for example a request
             // timeout or a JSON-RPC transport error). The Flutter reducer
             // otherwise keeps the turn in "thinking" forever. Claim and
-            // close the host lifecycle before emitting the synthetic event;
-            // a real remote terminal event racing with this path then loses
-            // the same terminal transition and cannot duplicate the card.
-            val ownsTerminal = clearActiveTurn(
-                threadId = sessionId,
-                expectedTurnId = turnId,
-                terminalStatus = terminalStatus,
+            // close the host lifecycle before returning the owning request
+            // error; the caller projects that official terminal boundary.
+            val detail = error.message?.trim()
+                ?.takeIf { it.isNotEmpty() }
+                ?: error.javaClass.simpleName
+            completeRemotePromptFromResponse(
+                sessionId = sessionId,
+                turnId = turnId,
+                status = terminalStatus,
+                error = detail.takeIf { terminalStatus != "cancelled" },
             )
-            if (ownsTerminal) {
-                val detail = error.message?.trim()
-                    ?.takeIf { it.isNotEmpty() }
-                    ?: error.javaClass.simpleName
-                emitRemoteTerminalEvent(
-                    sessionId = sessionId,
-                    turnId = turnId,
-                    status = terminalStatus,
-                    error = detail.takeIf { terminalStatus != "cancelled" },
-                )
-            }
             throw error
         } finally {
             remotePromptExecutions.remove(sessionId, execution)
@@ -1211,13 +1248,7 @@ class AgentRuntimeManager private constructor(
                 turnId,
                 terminalStatus = "cancelled",
             )
-            if (ownsTerminal) {
-                emitRemoteTerminalEvent(
-                    sessionId = sessionId,
-                    turnId = turnId,
-                    status = "cancelled",
-                )
-            }
+            // The returned session/cancel result is the lifecycle boundary.
             return mapOf(
                 "cancelled" to true,
                 "sessionId" to sessionId,
@@ -1231,9 +1262,7 @@ class AgentRuntimeManager private constructor(
                 )
         }
         val execution = remotePromptExecutions[sessionId]
-        val promptStarted = execution?.requestCancellation(
-            CancellationException("Remote ACP session cancellation requested")
-        ) == true
+        val promptStarted = execution?.requestCancellation() == true
         if (execution == null || promptStarted) {
             // ACP defines session/cancel as a notification. The host still
             // returns an acknowledgement to Flutter, but the Agent wire must
@@ -1296,13 +1325,7 @@ class AgentRuntimeManager private constructor(
             turnId,
             terminalStatus = "cancelled",
         )
-        if (ownsTerminal) {
-            emitRemoteTerminalEvent(
-                sessionId = sessionId,
-                turnId = turnId,
-                status = "cancelled",
-            )
-        }
+        // The returned session/cancel result is the lifecycle boundary.
         return mapOf(
             "cancelled" to true,
             "sessionId" to sessionId,
@@ -1316,36 +1339,6 @@ class AgentRuntimeManager private constructor(
             )
     }
 
-    private suspend fun emitRemoteTerminalEvent(
-        sessionId: String,
-        turnId: String,
-        status: String,
-        error: String? = null,
-    ) {
-        val params = linkedMapOf<String, Any?>(
-            "threadId" to sessionId,
-            "turnId" to turnId,
-            "status" to status,
-            "stopReason" to status,
-            "willRetry" to false,
-        )
-        error?.takeIf { it.isNotBlank() }?.let {
-            params["error"] = mapOf("message" to it)
-        }
-        emitEvent(
-            linkedMapOf(
-                "method" to remoteTerminalMethod(status),
-                "workspaceId" to RemoteCodexAppServerSession.DEFAULT_WORKSPACE_ID,
-                "threadId" to sessionId,
-                "turnId" to turnId,
-                "conversationId" to conversationIdForSession(sessionId),
-                "agentId" to AcpAgentProfileStore.CODEX_AGENT_ID,
-                "agentName" to "Codex",
-                "allowImplicitTurnAdmission" to false,
-                "params" to params,
-            )
-        )
-    }
 
     private suspend fun startThread(args: Map<String, Any?>): Map<String, Any?> {
         val conversationId = args.longValue("conversationId")
@@ -1699,6 +1692,9 @@ class AgentRuntimeManager private constructor(
     private suspend fun readAgentConfig(args: Map<String, Any?>): Map<String, Any?> {
         val agentId = args.stringValue("agentId")
             ?: throw IllegalArgumentException("agentId is required.")
+        val runtimeSettings = AgentRuntimeSettingsStore
+            .read(appContext, agentId)
+            .toMap()
         val profile = acpAgentProfileStore.list().firstOrNull { it.id == agentId }
             ?: throw IllegalArgumentException("Unknown ACP agent: $agentId")
         val harnessAdapter = AcpHarnessAdapters.forProfile(profile)
@@ -1716,7 +1712,7 @@ class AgentRuntimeManager private constructor(
             ) ?: throw UnsupportedOperationException(
                 "Harness does not expose a readable configuration surface."
             )
-            return payload
+            return payload + ("runtimeSettings" to runtimeSettings)
         }
         return when (profile.id) {
             AcpAgentProfileStore.CODEX_AGENT_ID -> {
@@ -1729,7 +1725,7 @@ class AgentRuntimeManager private constructor(
                     executorKey = "codex-agent-auth-read"
                 )
                 val sharedProvider = currentAgentProviderProfile()
-                linkedMapOf(
+                linkedMapOf<String, Any?>(
                     "agentId" to profile.id,
                     "kind" to "codex",
                     "configPath" to CODEX_CONFIG_TOML_DISPLAY_PATH,
@@ -1737,7 +1733,8 @@ class AgentRuntimeManager private constructor(
                     "baseUrl" to (sharedProvider?.baseUrl
                         ?: extractTomlString(configToml, "base_url").orEmpty()),
                     "model" to currentAgentBoundModel().orEmpty(),
-                    "apiKey" to extractOpenAiApiKey(authJson).orEmpty()
+                    "apiKey" to extractOpenAiApiKey(authJson).orEmpty(),
+                    "runtimeSettings" to runtimeSettings,
                 )
             }
             CLAUDE_CODE_AGENT_ID -> readRawAgentConfig(
@@ -1745,80 +1742,19 @@ class AgentRuntimeManager private constructor(
                 kind = "json",
                 path = CLAUDE_SETTINGS_JSON_PATH,
                 displayPath = CLAUDE_SETTINGS_JSON_DISPLAY_PATH
-            )
+            ) + ("runtimeSettings" to runtimeSettings)
             OPENCODE_AGENT_ID -> readRawAgentConfig(
                 profile = profile,
                 kind = "jsonc",
                 path = OPENCODE_CONFIG_JSON_PATH,
                 displayPath = OPENCODE_CONFIG_JSON_DISPLAY_PATH
-            )
+            ) + ("runtimeSettings" to runtimeSettings)
             else -> linkedMapOf(
                 "agentId" to profile.id,
-                "kind" to "profile"
+                "kind" to "profile",
+                "runtimeSettings" to runtimeSettings,
             )
         }
-    }
-
-    private suspend fun launchAgentWeb(args: Map<String, Any?>): Map<String, Any?> {
-        val agentId = args.stringValue("agentId")
-            ?: throw IllegalArgumentException("agentId is required.")
-        val service = AgentWebService.forAgentId(agentId)
-            ?: return AgentWebLaunchResult(
-                ok = false,
-                code = "UNSUPPORTED_AGENT",
-                packageId = "",
-                error = "This Agent does not expose a Web surface.",
-            ).toPayload()
-        val provider = currentAgentProviderCredentials()
-            ?: return AgentWebLaunchResult(
-                ok = false,
-                code = "PROVIDER_REQUIRED",
-                packageId = service.packageId,
-                error = "Configure the shared Dispatch Provider first.",
-            ).toPayload()
-        val model = currentAgentBoundModel()
-            ?: return AgentWebLaunchResult(
-                ok = false,
-                code = "MODEL_REQUIRED",
-                packageId = service.packageId,
-                error = "Select a shared Dispatch model first.",
-            ).toPayload()
-        val requestedReasoningEffort = args.stringValue("effort")
-            ?: args.stringValue("reasoningEffort")
-        val environment = when (service) {
-            AgentWebService.KIMI -> {
-                if (!requestedReasoningEffort.isNullOrBlank()) {
-                    val existingConfig = readTerminalTextFile(
-                        path = KIMI_CODE_CONFIG_PATH,
-                        executorKey = "kimi-code-config-read",
-                    )
-                    val updatedConfig = buildKimiCodeThinkingConfigToml(
-                        existingConfig = existingConfig,
-                        reasoningEffort = requestedReasoningEffort,
-                    )
-                    if (updatedConfig != existingConfig) {
-                        writeTerminalTextFile(
-                            path = KIMI_CODE_CONFIG_PATH,
-                            content = updatedConfig,
-                            executorKey = "kimi-code-config-write",
-                        )
-                    }
-                }
-                buildKimiCodeModelEnvironment(
-                    provider = provider,
-                    model = model,
-                    reasoningEffort = requestedReasoningEffort,
-                )
-            }
-            AgentWebService.DEEPSEEK_HARNESS ->
-                buildDeepSeekHarnessWebEnvironment(provider, model)
-        }
-        return agentWebLauncher.launch(
-            AgentWebLaunchRequest(
-                service = service,
-                environment = environment,
-            )
-        ).toPayload()
     }
 
     private suspend fun readRawAgentConfig(
@@ -1844,6 +1780,19 @@ class AgentRuntimeManager private constructor(
             ?: throw IllegalArgumentException("agentId is required.")
         val profile = acpAgentProfileStore.list().firstOrNull { it.id == agentId }
             ?: throw IllegalArgumentException("Unknown ACP agent: $agentId")
+        val runtimeSettings = args["runtimeSettings"]?.let { value ->
+            when (value) {
+                is Map<*, *> -> AgentRuntimeSettings.fromMap(value)
+                is String -> AgentRuntimeSettings.fromJson(value)
+                else -> throw IllegalArgumentException("runtimeSettings must be an object or JSON object")
+            }
+        }
+        if (runtimeSettings != null && isRuntimeSettingsOnlyAgentConfigUpdate(args)) {
+            localRuntimeFor(profile.id).disconnect()
+            clearActiveTurnsForAgent(profile.id)
+            AgentRuntimeSettingsStore.write(appContext, agentId, runtimeSettings)
+            return readAgentConfig(mapOf("agentId" to profile.id))
+        }
         val harnessAdapter = AcpHarnessAdapters.forProfile(profile)
         val harnessConfigPath = harnessAdapter.launchConfigPath
         if (harnessConfigPath != null) {
@@ -1867,6 +1816,7 @@ class AgentRuntimeManager private constructor(
             )
             localRuntimeFor(profile.id).disconnect()
             clearActiveTurnsForAgent(profile.id)
+            runtimeSettings?.let { AgentRuntimeSettingsStore.write(appContext, agentId, it) }
             return readAgentConfig(mapOf("agentId" to profile.id))
         }
         when (profile.id) {
@@ -1895,7 +1845,10 @@ class AgentRuntimeManager private constructor(
                         baseUrl = baseUrl,
                         model = resolvedModel,
                         wireApi = args.stringValue("wireApi") ?: OpenAiWireApi.RESPONSES,
-                        modelCatalogPath = CODEX_MODEL_CATALOG_JSON_PATH
+                        modelCatalogPath = CODEX_MODEL_CATALOG_JSON_PATH,
+                        envHttpHeaders = buildAcpHeaderBindings(
+                            currentAgentProviderProfile()?.customHeaders.orEmpty()
+                        ).envHttpHeaders,
                     ),
                     authJson = buildCodexAuthJson(apiKey),
                     modelCatalogJson = buildCodexModelCatalogJson(providerModels)
@@ -1931,12 +1884,17 @@ class AgentRuntimeManager private constructor(
                     executorKey = "agent-config-write-${profile.id}"
                 )
             }
-            else -> throw UnsupportedOperationException(
-                "Custom ACP Agent settings are stored in its launch profile."
-            )
+            else -> {
+                if (runtimeSettings == null) {
+                    throw UnsupportedOperationException(
+                        "Custom ACP Agent settings are stored in its launch profile."
+                    )
+                }
+            }
         }
         localRuntimeFor(profile.id).disconnect()
         clearActiveTurnsForAgent(profile.id)
+        runtimeSettings?.let { AgentRuntimeSettingsStore.write(appContext, agentId, it) }
         return readAgentConfig(mapOf("agentId" to profile.id))
     }
 
@@ -2237,17 +2195,15 @@ class AgentRuntimeManager private constructor(
     private suspend fun connectLocalAcp(
         profile: AcpAgentProfile = acpAgentProfileStore.selected(),
         runtime: LocalAcpRuntime = localRuntimeFor(profile.id),
-        reasoningEffort: String? = null,
     ) {
         require(profile.enabled) {
             "No enabled ACP Agent is selected. Enable one in Agent mode settings."
         }
-        runtime.connect(profile = profile, reasoningEffort = reasoningEffort)
+        runtime.connect(profile = profile)
     }
 
     private suspend fun prepareLocalAcpLaunch(
-        profile: AcpAgentProfile,
-        reasoningEffort: String? = null,
+        profile: AcpAgentProfile
     ): Map<String, String> {
         val usesSharedProvider = AcpAgentProfileStore
             .officialRuntime(profile)
@@ -2314,8 +2270,6 @@ class AgentRuntimeManager private constructor(
             append('|')
             append(resolvedModel.orEmpty())
             append('|')
-            append(normalizeKimiCodeThinkingEffort(reasoningEffort).orEmpty())
-            append('|')
             // Credentials are never logged; the hash only invalidates the
             // in-memory environment when a Provider/API key changes.
             append(sharedProvider?.hashCode() ?: 0)
@@ -2335,7 +2289,6 @@ class AgentRuntimeManager private constructor(
                 agentId = profile.id,
                 provider = sharedProvider,
                 model = resolvedModel,
-                reasoningEffort = reasoningEffort,
                 harnessAdapter = harnessAdapter,
             )
         )
@@ -2375,7 +2328,6 @@ class AgentRuntimeManager private constructor(
                 agentId = profile.id,
                 provider = sharedProvider,
                 model = resolvedModel,
-                reasoningEffort = reasoningEffort,
                 harnessAdapter = harnessAdapter,
             ),
             mapping = mapping,
@@ -2858,12 +2810,7 @@ class AgentRuntimeManager private constructor(
         // runtime, or lazily start one, without touching other profiles.
         val targetRuntime = localRuntimeFor(targetProfile.id)
         if (!targetRuntime.isConnected) {
-            connectLocalAcp(
-                profile = targetProfile,
-                runtime = targetRuntime,
-                reasoningEffort = args.stringValue("effort")
-                    ?: args.stringValue("reasoningEffort"),
-            )
+            connectLocalAcp(profile = targetProfile, runtime = targetRuntime)
         }
         if (conversationId != null) {
             if (normalConversation && conversationAgentId != targetProfile.id) {
@@ -3830,6 +3777,42 @@ class AgentRuntimeManager private constructor(
 }
 
 /**
+ * Resolve the Agent-advertised ACP config id instead of guessing a private
+ * field name. Different ACP Agents may use a stable id other than
+ * `reasoning_effort`, while the official category remains thought-level.
+ */
+internal fun resolveAdvertisedReasoningEffortConfigId(
+    payload: Map<String, Any?>,
+    requestedEffort: String,
+): String? {
+    val options = payload["configOptions"] as? List<*> ?: return null
+    return options.asSequence()
+        .mapNotNull { it as? Map<*, *> }
+        .firstOrNull { option ->
+            val id = option["id"]?.toString()?.trim().orEmpty()
+            val category = option["category"]?.toString()?.trim()?.lowercase().orEmpty()
+            val isReasoning = id == "reasoning_effort" ||
+                category == "thought_level" ||
+                category == "thought-level" ||
+                id.contains("reasoning", ignoreCase = true)
+            if (!isReasoning || id.isEmpty()) return@firstOrNull false
+            val advertisedValues = (option["options"] as? List<*>)
+                .orEmpty()
+                .mapNotNull { value ->
+                    when (value) {
+                        is Map<*, *> -> value["value"]?.toString()
+                        else -> value?.toString()
+                    }
+                }
+            advertisedValues.contains(requestedEffort)
+        }
+        ?.get("id")
+        ?.toString()
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+}
+
+/**
  * Bound the disconnected EventChannel buffer without ever evicting the only
  * terminal signal for a live ACP identity. Dropping ordinary deltas is
  * recoverable from a later snapshot; dropping `turn/completed`/`turn/failed`
@@ -4413,6 +4396,7 @@ internal fun buildOpenCodeConfigJson(
     model: String,
     baseUrl: String,
     existingConfigJson: String = "",
+    customHeaders: Map<String, String> = emptyMap(),
 ): String {
     val providerModel = model.substringAfter("/", model)
     val root = runCatching {
@@ -4435,6 +4419,26 @@ internal fun buildOpenCodeConfigJson(
     }
     options.addProperty("baseURL", baseUrl)
     options.addProperty("apiKey", "{env:OPENAI_API_KEY}")
+    val headers = options.getAsJsonObject("headers")
+        ?: com.google.gson.JsonObject().also { options.add("headers", it) }
+    // The Provider is the editable source of truth. Remove only values that
+    // this adapter generated on an earlier launch; preserve unrelated user
+    // headers in the official OpenCode file.
+    headers.entrySet()
+        .filter { (_, value) ->
+            value.isJsonPrimitive &&
+                value.asString.startsWith("{env:OMNIBOT_PROVIDER_HEADER_")
+        }
+        .map { it.key }
+        .forEach(headers::remove)
+    ProviderCustomHeaderUtils.sanitizeCustomHeaders(customHeaders)
+        .entries
+        .forEachIndexed { index, (name, _) ->
+            headers.addProperty(name, "{env:OMNIBOT_PROVIDER_HEADER_$index}")
+        }
+    if (headers.entrySet().isEmpty()) {
+        options.remove("headers")
+    }
     val models = provider.getAsJsonObject("models") ?: com.google.gson.JsonObject().also {
         provider.add("models", it)
     }
@@ -4443,11 +4447,6 @@ internal fun buildOpenCodeConfigJson(
             models.add(providerModel, it)
         }
     modelConfig.addProperty("name", providerModel)
-    val limits = modelConfig.getAsJsonObject("limit") ?: com.google.gson.JsonObject().also {
-        modelConfig.add("limit", it)
-    }
-    limits.addProperty("context", 128000)
-    limits.addProperty("output", 8192)
 
     return GsonBuilder().setPrettyPrinting().create().toJson(root) + "\n"
 }
@@ -4484,7 +4483,8 @@ internal fun buildCodexConfigToml(
     baseUrl: String,
     model: String,
     wireApi: String = OpenAiWireApi.RESPONSES,
-    modelCatalogPath: String? = null
+    modelCatalogPath: String? = null,
+    envHttpHeaders: Map<String, String> = emptyMap(),
 ): String {
     val codexWireApi = if (OpenAiWireApi.isResponses(wireApi)) {
         OpenAiWireApi.RESPONSES
@@ -4503,7 +4503,12 @@ internal fun buildCodexConfigToml(
         "name = \"omnimind\"",
         "base_url = ${tomlString(baseUrl.trim())}",
         "wire_api = \"$codexWireApi\"",
-        "requires_openai_auth = true"
+        "requires_openai_auth = true",
+        envHttpHeaders.takeIf { it.isNotEmpty() }?.let { headers ->
+            "env_http_headers = { " + headers.entries.joinToString(", ") {
+                "${tomlString(it.key)} = ${tomlString(it.value)}"
+            } + " }"
+        }.orEmpty(),
     )
     return lines.joinToString(separator = "\n", postfix = "\n")
 }

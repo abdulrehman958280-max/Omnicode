@@ -179,6 +179,62 @@ void main() {
     expect(runtime.isAiResponding, isTrue);
   });
 
+  test('projects the official session prompt response without turn events', () {
+    const conversationId = 2048;
+    coordinator.beginAcpTurn(
+      taskId: 'local-prompt',
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    coordinator.bindAcpSession(
+      taskId: 'local-prompt',
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+      sessionId: 'session-official',
+    );
+    coordinator.applyAgentEvent(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+      event: acpEvent(
+        'turn/started',
+        turnId: 'turn-official',
+        sessionId: 'session-official',
+      ),
+    );
+    coordinator.applyAgentEvent(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+      event: acpEvent(
+        'session/update',
+        turnId: 'turn-official',
+        sessionId: 'session-official',
+        params: <String, dynamic>{
+          'update': <String, dynamic>{
+            'sessionUpdate': 'agent_message_chunk',
+            'messageId': 'message-official',
+            'content': <String, dynamic>{'text': 'ACP 输出'},
+          },
+        },
+      ),
+    );
+    final result = coordinator.applyAcpPromptResponse(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+      sessionId: 'session-official',
+      turnId: 'turn-official',
+      stopReason: 'end_turn',
+    );
+    final runtime = coordinator.runtimeFor(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    )!;
+
+    expect(result.method, 'session/prompt');
+    expect(runtime.isAiResponding, isFalse);
+    expect(runtime.activeAcpTurnId, isNull);
+    expect(runtime.messages.any((message) => message.text == 'ACP 输出'), isTrue);
+  });
+
   test(
     'persists legacy normal ACP events into canonical agent history',
     () async {

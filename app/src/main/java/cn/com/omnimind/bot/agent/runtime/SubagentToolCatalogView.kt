@@ -30,7 +30,7 @@ class SubagentToolCatalogView(
         parent.validateArguments(toolName, arguments)
     }
 
-    override fun searchTools(query: String, limit: Int): List<AgentToolSearchEntry> {
+    override fun searchTools(query: String, limit: Int?): List<AgentToolSearchEntry> {
         return parent.searchTools(query, limit).filter { isAllowed(it.name) }
     }
 

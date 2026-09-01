@@ -253,7 +253,7 @@ class AgentToolRegistry(
         )
     }
 
-    override fun searchTools(query: String, limit: Int): List<AgentToolSearchEntry> {
+    override fun searchTools(query: String, limit: Int?): List<AgentToolSearchEntry> {
         val normalizedTerms = query
             .trim()
             .lowercase()
@@ -290,10 +290,11 @@ class AgentToolRegistry(
             }
             .sortedWith(compareByDescending<Pair<AgentToolSearchEntry, Int>> { it.second }
                 .thenBy { it.first.name.lowercase() })
-            .take(limit.coerceIn(1, 50))
-            .map { it.first }
-            .toList()
-        return scored
+        return if (limit == null) {
+            scored.map { it.first }.toList()
+        } else {
+            scored.take(limit.coerceAtLeast(1)).map { it.first }.toList()
+        }
     }
 
     override fun exposeToolNames(names: Set<String>) {

@@ -188,6 +188,55 @@ List<String> extractAcpModelIds(Map<String, dynamic> response) {
   return _uniqueAcpChoiceIds(rawItems);
 }
 
+/// Returns the Agent-owned ACP config id for thought/reasoning choices.
+///
+/// Codex currently uses `reasoning_effort`, while other ACP Agents may use a
+/// different id. Keep the id next to the values so a live
+/// `session/set_config_option` call does not guess a vendor field.
+String? extractAcpReasoningEffortConfigId(Map<String, dynamic> response) {
+  String? visit(Map<dynamic, dynamic> source) {
+    for (final entry in source.entries) {
+      final value = entry.value;
+      if (value is List) {
+        if (_normalizeAcpConfigKey(entry.key.toString()) == 'configoptions') {
+          for (final item in value) {
+            final option = _normalizeMap(item);
+            if (option == null) continue;
+            final id = option['id']?.toString().trim() ?? '';
+            final category = _normalizeAcpConfigKey(
+              option['category']?.toString() ?? '',
+            );
+            if (id.isNotEmpty &&
+                option['options'] is List &&
+                (category == 'thoughtlevel' ||
+                    id.toLowerCase() == 'reasoning_effort' ||
+                    id.toLowerCase() == 'reasoning-effort' ||
+                    id.toLowerCase() == 'effort')) {
+              return id;
+            }
+          }
+        }
+        for (final item in value) {
+          final nested = _normalizeMap(item);
+          if (nested != null) {
+            final found = visit(nested);
+            if (found != null) return found;
+          }
+        }
+      } else {
+        final nested = _normalizeMap(value);
+        if (nested != null) {
+          final found = visit(nested);
+          if (found != null) return found;
+        }
+      }
+    }
+    return null;
+  }
+
+  return visit(response);
+}
+
 /// Extracts only ACP thought-level/reasoning choices.
 List<String> extractAcpReasoningEffortIds(Map<String, dynamic> response) {
   final rawItems = <dynamic>[];
@@ -844,16 +893,6 @@ class AgentRuntimeService {
     return _invokeMap('agent/prepare', {'agentId': agentId.trim()});
   }
 
-  static Future<Map<String, dynamic>> launchAgentWeb(
-    String agentId, {
-    String? effort,
-  }) {
-    return _invokeMap('agent/web/launch', {
-      'agentId': agentId.trim(),
-      if (effort != null && effort.trim().isNotEmpty) 'effort': effort.trim(),
-    });
-  }
-
   static Future<Map<String, dynamic>> prepareAgentInBackground(String agentId) {
     final normalizedId = agentId.trim();
     final existing = _agentPreparationTasks[normalizedId];
@@ -898,6 +937,7 @@ class AgentRuntimeService {
     String? reasoningEffort,
     String? permissionMode,
     String? content,
+    Map<String, dynamic>? runtimeSettings,
   }) {
     return _invokeMap('agent/config/write', {
       'agentId': agentId.trim(),
@@ -907,6 +947,7 @@ class AgentRuntimeService {
       if (reasoningEffort != null) 'reasoningEffort': reasoningEffort,
       if (permissionMode != null) 'permissionMode': permissionMode,
       if (content != null) 'content': content,
+      if (runtimeSettings != null) 'runtimeSettings': runtimeSettings,
     });
   }
 

@@ -51,7 +51,31 @@ object DeepSeekProvider {
                 ),
             requiresReasoningContentForToolCalls = shouldUseOfficialAdapter(protocolType, apiBase),
             requiresAnthropicThinkingReplay = normalizedProtocol == "anthropic",
+            supportsResponsesPromptCacheKey = !shouldUseOfficialAdapter(protocolType, apiBase),
+            supportsResponsesParallelToolCalls = !shouldUseOfficialAdapter(protocolType, apiBase),
+            supportsVisionInput = visionInputSupport(protocolType, apiBase, model),
         )
+    }
+
+    /**
+     * DeepSeek documents V4-Flash as text-only and exposes image input through
+     * the separate `deepseek-v4-flash-vision-exp` model. Only make this
+     * decision for the official host; a proxy may expose a different contract.
+     */
+    private fun visionInputSupport(
+        protocolType: String?,
+        apiBase: String?,
+        model: String?,
+    ): Boolean? {
+        if (normalizeProtocolType(protocolType) == "anthropic" || !isOfficialBaseUrl(apiBase)) {
+            return null
+        }
+        val normalizedModel = model
+            ?.trim()
+            ?.lowercase()
+            ?.substringAfterLast('/')
+            .orEmpty()
+        return normalizedModel == "deepseek-v4-flash-vision-exp"
     }
 
     /**
@@ -96,10 +120,12 @@ object DeepSeekProvider {
         value?.trim()?.lowercase()?.startsWith("deepseek-v4") == true
 
     fun mapReasoningEffortForOfficialApi(value: String?): String? {
-        return when (value?.trim()?.lowercase().orEmpty()) {
-            "low" -> "low"
-            "high", "medium", "xhigh" -> "high"
-            "max" -> "max"
+        return when (ReasoningEffort.normalize(value)) {
+            ReasoningEffort.LOW -> ReasoningEffort.LOW
+            ReasoningEffort.HIGH,
+            ReasoningEffort.MEDIUM,
+            ReasoningEffort.XHIGH -> ReasoningEffort.HIGH
+            ReasoningEffort.MAX -> ReasoningEffort.MAX
             else -> null
         }
     }

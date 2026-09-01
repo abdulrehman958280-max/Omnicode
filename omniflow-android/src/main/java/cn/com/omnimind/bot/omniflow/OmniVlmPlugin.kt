@@ -13,7 +13,8 @@ class OmniVlmPlugin internal constructor(
         val runId: String = "gui-${UUID.randomUUID()}",
         val stepSkillGuidance: String = "",
         val deferUserInput: Boolean = true,
-        val maxSteps: Int = DEFAULT_MAX_STEPS,
+        val maxSteps: Int? = null,
+        val maxRejectedActionRetries: Int? = null,
     )
 
     data class Hooks(
@@ -62,7 +63,6 @@ class OmniVlmPlugin internal constructor(
         const val MODEL_SCENE = "scene.vlm.operation.primary"
         const val RUN_GUI_TOOL = "run_gui"
         const val RUN_LOG_TOOL = "vlm_task"
-        const val DEFAULT_MAX_STEPS = 20
         private val shared = OmniVlmPlugin(DefaultOmniVlmBackend)
 
         suspend fun execute(
@@ -132,12 +132,12 @@ private fun safePaymentResult(payload: Map<String, Any?>): Map<String, Any?> {
         return payload
     }
     return payload + mapOf(
-        "success" to true,
-        "status" to "succeeded",
-        "done_reason" to "pending_unpaid_order",
+        "success" to false,
+        "status" to "waiting_input",
+        "done_reason" to "payment_confirmation_required",
         "payment_confirmation_blocked" to true,
-        "error_code" to null,
-        "error_message" to null,
+        "error_code" to "PAYMENT_CONFIRMATION_REQUIRED",
+        "error_message" to "需要用户确认支付后才能继续",
     )
 }
 
@@ -148,5 +148,6 @@ internal fun OmniVlmPlugin.Request.runGuiArguments(): Map<String, Any?> = buildM
         put("step_skill_guidance", it)
     }
     put("defer_user_input", deferUserInput)
-    put("max_steps", maxSteps)
+    maxSteps?.let { put("max_steps", it) }
+    maxRejectedActionRetries?.let { put("max_rejected_action_retries", it) }
 }

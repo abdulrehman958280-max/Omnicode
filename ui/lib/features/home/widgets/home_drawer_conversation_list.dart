@@ -1158,7 +1158,6 @@ extension _HomeDrawerConversationList on HomeDrawerState {
       'claude-code-acp' => 'Claude Code',
       'opencode-acp' => 'OpenCode',
       'deepseek-harness-acp' => 'DeepSeek',
-      'kimi-code-acp' => 'Kimi Code',
       _ => _humanizeAgentId(agentId),
     };
   }

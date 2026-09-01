@@ -45,39 +45,6 @@ void main() {
     expect(capturedCall?.arguments, {'agentId': 'xiaowan-acp'});
   });
 
-  test('launchAgentWeb uses the native Web surface boundary', () async {
-    MethodCall? capturedCall;
-    messenger.setMockMethodCallHandler(channel, (call) async {
-      capturedCall = call;
-      return <String, dynamic>{
-        'ok': true,
-        'code': 'OPENED',
-        'packageId': 'kimi',
-      };
-    });
-
-    final result = await AgentRuntimeService.launchAgentWeb('kimi-code-acp');
-
-    expect(capturedCall?.method, 'agent/web/launch');
-    expect(capturedCall?.arguments, {'agentId': 'kimi-code-acp'});
-    expect(result['code'], 'OPENED');
-  });
-
-  test('launchAgentWeb forwards the selected thinking effort', () async {
-    MethodCall? capturedCall;
-    messenger.setMockMethodCallHandler(channel, (call) async {
-      capturedCall = call;
-      return <String, dynamic>{'ok': true, 'code': 'OPENED'};
-    });
-
-    await AgentRuntimeService.launchAgentWeb('kimi-code-acp', effort: 'high');
-
-    expect(capturedCall?.arguments, {
-      'agentId': 'kimi-code-acp',
-      'effort': 'high',
-    });
-  });
-
   test('ensureSession reserves a session before a new prompt', () async {
     final calls = <MethodCall>[];
     messenger.setMockMethodCallHandler(channel, (call) async {
@@ -453,6 +420,28 @@ void main() {
       'xhigh',
       'max',
     ]);
+    expect(extractAcpReasoningEffortConfigId(response), 'reasoning_effort');
+  });
+
+  test('ACP reasoning config id follows the Agent declaration', () {
+    expect(
+      extractAcpReasoningEffortConfigId(<String, dynamic>{
+        'result': <String, dynamic>{
+          'configOptions': <Map<String, dynamic>>[
+            <String, dynamic>{
+              'id': 'effort',
+              'category': 'thought_level',
+              'type': 'select',
+              'options': <Map<String, dynamic>>[
+                <String, dynamic>{'value': 'default'},
+                <String, dynamic>{'value': 'high'},
+              ],
+            },
+          ],
+        },
+      }),
+      'effort',
+    );
   });
 
   test('ACP model extraction supports category-only config responses', () {

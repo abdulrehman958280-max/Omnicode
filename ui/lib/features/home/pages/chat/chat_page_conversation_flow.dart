@@ -1012,6 +1012,16 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
       final responseTurnId =
           _asAgentString(response['promptId']) ??
           _asAgentString(response['turnId']);
+      _runtimeCoordinator.applyAcpPromptResponse(
+        conversationId: resolvedConversationId,
+        mode: dispatchModeKey,
+        sessionId: responseSessionId ?? acpSessionId,
+        turnId: responseTurnId,
+        stopReason:
+            _asAgentString(response['stopReason']) ??
+            _asAgentString(response['status']),
+        error: _asAgentString(response['error']),
+      );
       if (isDispatchTargetCurrent()) {
         _normalAcpSessionId = responseSessionId ?? acpSessionId;
         if (_normalAcpSessionId != null) {
@@ -1032,11 +1042,26 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
         conversationId: resolvedConversationId,
         mode: dispatchModeKey,
       );
-      _runtimeCoordinator.unregisterTask(
-        aiMessageId,
+      final runtime = _runtimeCoordinator.runtimeFor(
         conversationId: resolvedConversationId,
         mode: dispatchModeKey,
       );
+      if (runtime?.isAiResponding == true) {
+        _runtimeCoordinator.applyAcpPromptResponse(
+          conversationId: resolvedConversationId,
+          mode: dispatchModeKey,
+          sessionId: runtime?.activeAcpSessionId ?? _normalAcpSessionId,
+          turnId: runtime?.activeAcpTurnId ?? _normalAcpTurnId,
+          stopReason: 'error',
+          error: formatAgentRuntimeErrorForUser(error),
+        );
+      } else {
+        _runtimeCoordinator.unregisterTask(
+          aiMessageId,
+          conversationId: resolvedConversationId,
+          mode: dispatchModeKey,
+        );
+      }
       // A cancellation can make the prompt Future fail after the official
       // session/cancel has already detached the task. That is a terminal
       // cancellation, not a new user-visible error.
@@ -1196,6 +1221,16 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
       final responseTurnId =
           _asAgentString(response['promptId']) ??
           _asAgentString(response['turnId']);
+      _runtimeCoordinator.applyAcpPromptResponse(
+        conversationId: resolvedConversationId,
+        mode: dispatchModeKey,
+        sessionId: responseSessionId ?? acpSessionId,
+        turnId: responseTurnId,
+        stopReason:
+            _asAgentString(response['stopReason']) ??
+            _asAgentString(response['status']),
+        error: _asAgentString(response['error']),
+      );
       if (isDispatchTargetCurrent()) {
         _normalAcpSessionId = responseSessionId ?? acpSessionId;
         if (_normalAcpSessionId != null) {
@@ -1217,7 +1252,22 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
             conversationId: conversationId!,
             mode: dispatchModeKey,
           );
-      if (shouldShowError) {
+      final runtime = conversationId == null
+          ? null
+          : _runtimeCoordinator.runtimeFor(
+              conversationId: conversationId!,
+              mode: dispatchModeKey,
+            );
+      if (runtime?.isAiResponding == true) {
+        _runtimeCoordinator.applyAcpPromptResponse(
+          conversationId: conversationId!,
+          mode: dispatchModeKey,
+          sessionId: runtime?.activeAcpSessionId ?? _normalAcpSessionId,
+          turnId: runtime?.activeAcpTurnId ?? _normalAcpTurnId,
+          stopReason: 'error',
+          error: formatAgentRuntimeErrorForUser(e),
+        );
+      } else if (shouldShowError) {
         handleAgentError(e.toString(), taskIdOverride: aiMessageId);
       } else {
         // A conversation switch made this result stale; it must not render an
@@ -1298,15 +1348,15 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
       if (_activeConversationMode == ChatPageMode.normal &&
           activeConversationModeValue != ConversationMode.chatOnly &&
           (_currentDispatchTurnId != null || _normalAcpTurnId != null)) {
-        // Keep the host reservation alive until ACP emits its terminal event.
+        // Keep the host reservation alive until the official cancel result.
         // The shared reducer then finalizes cards, history, and the spinner
         // exactly once.
         interruptActiveToolCard();
         unawaited(
-          AgentRuntimeService.cancelPrompt(
-            conversationId: _currentConversationId,
+          cancelAcpPromptForMode(
+            mode: ChatPageMode.normal,
             sessionId: _normalAcpSessionId,
-            promptId: _normalAcpTurnId,
+            turnId: _normalAcpTurnId,
           ),
         );
         return;
@@ -1318,10 +1368,10 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
         _cancelDispatchTask();
       } else {
         unawaited(
-          AgentRuntimeService.cancelPrompt(
-            conversationId: _currentConversationId,
+          cancelAcpPromptForMode(
+            mode: ChatPageMode.normal,
             sessionId: _normalAcpSessionId,
-            promptId: _normalAcpTurnId,
+            turnId: _normalAcpTurnId,
           ),
         );
       }
@@ -1365,27 +1415,27 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
     if (_activeConversationMode == ChatPageMode.normal &&
         activeConversationModeValue != ConversationMode.chatOnly) {
       unawaited(
-        AgentRuntimeService.cancelPrompt(
-          conversationId: _currentConversationId,
+        cancelAcpPromptForMode(
+          mode: ChatPageMode.normal,
           sessionId: normalSessionId,
-          promptId: normalTurnId,
+          turnId: normalTurnId,
         ),
       );
       return;
     }
     if (_activeConversationMode == ChatPageMode.agent) {
-      // The ACP terminal event is the only authority allowed to end a new
-      // Agent turn. This method is also used by card-level stop actions.
+      // The official ACP cancel result is the only authority allowed to end a
+      // new Agent turn. This method is also used by card-level stop actions.
       unawaited(_interruptAgentTurn());
       return;
     }
     if (!(_activeConversationMode == ChatPageMode.normal &&
         activeConversationModeValue != ConversationMode.chatOnly)) {
       unawaited(
-        AgentRuntimeService.cancelPrompt(
-          conversationId: _currentConversationId,
+        cancelAcpPromptForMode(
+          mode: _activeConversationMode,
           sessionId: agentSessionId,
-          promptId: agentTurnId,
+          turnId: agentTurnId,
         ),
       );
     }
@@ -1440,10 +1490,10 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
       if (_activeConversationMode == ChatPageMode.normal &&
           activeConversationModeValue != ConversationMode.chatOnly) {
         unawaited(
-          AgentRuntimeService.cancelPrompt(
-            conversationId: _currentConversationId,
+          cancelAcpPromptForMode(
+            mode: ChatPageMode.normal,
             sessionId: normalSessionId,
-            promptId: normalTurnId,
+            turnId: normalTurnId,
           ),
         );
         return;
@@ -1455,10 +1505,10 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
       if (!(_activeConversationMode == ChatPageMode.normal &&
           activeConversationModeValue != ConversationMode.chatOnly)) {
         unawaited(
-          AgentRuntimeService.cancelPrompt(
-            conversationId: _currentConversationId,
+          cancelAcpPromptForMode(
+            mode: _activeConversationMode,
             sessionId: agentSessionId,
-            promptId: agentTurnId,
+            turnId: agentTurnId,
           ),
         );
       }
