@@ -50,6 +50,38 @@ class OmniPluginActionItem {
       ),
     );
   }
+
+  bool supportsPlacement(String placement) {
+    final normalized = placement.trim();
+    if (normalized.isEmpty) return false;
+    if (presentation['placement']?.toString().trim() == normalized) {
+      return true;
+    }
+    final placements = presentation['placements'];
+    return placements is Iterable &&
+        placements.any((value) => value?.toString().trim() == normalized);
+  }
+
+  String localizedPresentationValue(
+    String key, {
+    required bool english,
+    required String fallback,
+  }) {
+    final value = presentation[key];
+    if (value is Map) {
+      final localized = value[english ? 'en' : 'zh']?.toString().trim() ?? '';
+      if (localized.isNotEmpty) return localized;
+      final englishValue = value['en']?.toString().trim() ?? '';
+      if (englishValue.isNotEmpty) return englishValue;
+      final chineseValue = value['zh']?.toString().trim() ?? '';
+      if (chineseValue.isNotEmpty) return chineseValue;
+    }
+    final text = value?.toString().trim() ?? '';
+    return text.isEmpty ? fallback : text;
+  }
+
+  int get quickLaunchOrder =>
+      int.tryParse(presentation['quickLaunchOrder']?.toString() ?? '') ?? 0;
 }
 
 class OmniPluginService {

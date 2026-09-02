@@ -173,8 +173,12 @@ internal object AgentWebActions {
             displayName = "Kimi Code Web",
             description = "Open the local Kimi Code browser interface.",
             packageId = AgentWebService.KIMI.packageId,
+            agentId = "kimi-code-acp",
+            quickLaunchOrder = 0,
             labelZh = "Kimi Code Web",
             labelEn = "Kimi Code Web",
+            shortLabelZh = "Kimi Web",
+            shortLabelEn = "Kimi Web",
             descriptionZh = "使用统一 Provider 和模型，在系统浏览器中打开本机 Web 界面",
             descriptionEn = "Open the local Web UI with the shared Provider and model",
         ),
@@ -183,8 +187,12 @@ internal object AgentWebActions {
             displayName = "DeepSeek Harness Web",
             description = "Open the local DeepSeek Harness browser interface.",
             packageId = AgentWebService.DEEPSEEK_HARNESS.packageId,
+            agentId = "deepseek-harness-acp",
+            quickLaunchOrder = 1,
             labelZh = "DeepSeek Harness Web",
             labelEn = "DeepSeek Harness Web",
+            shortLabelZh = "DSH Web",
+            shortLabelEn = "DSH Web",
             descriptionZh = "使用统一 Provider 和模型，在系统浏览器中打开本机 Web 界面",
             descriptionEn = "Open the local Web UI with the shared Provider and model",
         ),
@@ -195,8 +203,12 @@ internal object AgentWebActions {
         displayName: String,
         description: String,
         packageId: String,
+        agentId: String,
+        quickLaunchOrder: Int,
         labelZh: String,
         labelEn: String,
+        shortLabelZh: String,
+        shortLabelEn: String,
         descriptionZh: String,
         descriptionEn: String,
     ) = OmniPluginActionDefinition(
@@ -205,9 +217,16 @@ internal object AgentWebActions {
         description = description,
         presentation = buildJsonObject {
             put("placement", "agent_settings")
+            put("placements", buildJsonArray {
+                add(JsonPrimitive("agent_settings"))
+                add(JsonPrimitive("home_drawer_quick_launch"))
+            })
             put("icon", "globe")
             put("packageId", packageId)
+            put("agentId", agentId)
+            put("quickLaunchOrder", quickLaunchOrder)
             put("label", localized(labelZh, labelEn))
+            put("shortLabel", localized(shortLabelZh, shortLabelEn))
             put("description", localized(descriptionZh, descriptionEn))
         },
     )

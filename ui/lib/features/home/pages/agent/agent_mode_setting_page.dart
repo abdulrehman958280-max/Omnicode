@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:ui/core/router/go_router_manager.dart';
 import 'package:ui/services/agent_runtime_service.dart';
+import 'package:ui/services/agent_web_action_presenter.dart';
 import 'package:ui/services/omni_plugin_service.dart';
 import 'package:ui/services/scene_model_config_service.dart';
 import 'package:ui/services/storage_service.dart';
@@ -116,9 +117,7 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
       if (!mounted) return;
       setState(() {
         _pluginActions = actions
-            .where(
-              (action) => action.presentation['placement'] == 'agent_settings',
-            )
+            .where((action) => action.supportsPlacement('agent_settings'))
             .toList(growable: false);
       });
     } catch (_) {
@@ -400,107 +399,12 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
   String _pluginActionKey(OmniPluginActionItem action) =>
       '${action.pluginId}/${action.id}';
 
-  String _localizedPluginValue(Object? value, String fallback) {
-    if (value is Map) {
-      final language = _english ? 'en' : 'zh';
-      final localized = value[language]?.toString().trim() ?? '';
-      if (localized.isNotEmpty) return localized;
-      final english = value['en']?.toString().trim() ?? '';
-      if (english.isNotEmpty) return english;
-      final chinese = value['zh']?.toString().trim() ?? '';
-      if (chinese.isNotEmpty) return chinese;
-    }
-    final text = value?.toString().trim() ?? '';
-    return text.isEmpty ? fallback : text;
-  }
-
   Future<void> _invokePluginAction(OmniPluginActionItem action) async {
     final key = _pluginActionKey(action);
     if (_busyPluginActionKey != null) return;
     setState(() => _busyPluginActionKey = key);
     try {
-      final response = await OmniPluginService.invokeAction(
-        action.pluginId,
-        action.id,
-      );
-      if (!mounted) return;
-      final code = response['code']?.toString().trim() ?? '';
-      final label = _localizedPluginValue(
-        action.presentation['label'],
-        action.displayName,
-      );
-      switch (code) {
-        case 'OPENED':
-          showToast(_text('$label 已打开', '$label opened'));
-          return;
-        case 'RUNTIME_MISSING':
-          final packageId =
-              response['packageId']?.toString().trim().isNotEmpty == true
-              ? response['packageId'].toString().trim()
-              : action.presentation['packageId']?.toString().trim() ?? '';
-          GoRouterManager.push(
-            '/home/termux_setting?focus=${Uri.encodeComponent(packageId)}',
-          );
-          return;
-        case 'PROVIDER_REQUIRED':
-          showToast(
-            _text(
-              '请先配置统一 Dispatch Provider',
-              'Configure the shared Dispatch Provider first',
-            ),
-            type: ToastType.warning,
-          );
-          GoRouterManager.push('/home/model_provider_setting');
-          return;
-        case 'MODEL_REQUIRED':
-          showToast(
-            _text('请先为 Dispatch 选择模型', 'Select a model for Dispatch first'),
-            type: ToastType.warning,
-          );
-          GoRouterManager.push('/home/model_provider_setting');
-          return;
-        case 'UNSUPPORTED_PROVIDER':
-          showToast(
-            _text(
-              '$label 暂不支持当前 Provider 协议',
-              '$label does not support the current Provider protocol',
-            ),
-            type: ToastType.warning,
-          );
-          return;
-        case 'URL_TIMEOUT':
-          showToast(
-            _text('$label 启动超时，后台进程已停止', '$label timed out and was stopped'),
-            type: ToastType.error,
-          );
-          return;
-        case 'STOP_FAILED':
-          showToast(
-            _text(
-              '$label 的旧进程无法停止，请在终端设置中处理后重试',
-              'The previous $label process could not be stopped; check Terminal settings and retry',
-            ),
-            type: ToastType.error,
-          );
-          return;
-        case 'BROWSER_UNAVAILABLE':
-          showToast(
-            _text('没有可用的系统浏览器', 'No system browser is available'),
-            type: ToastType.error,
-          );
-          return;
-        default:
-          showToast(
-            _text('$label 启动失败', 'Failed to start $label'),
-            type: ToastType.error,
-          );
-      }
-    } catch (error) {
-      if (!mounted) return;
-      showToast(
-        _text('启动 Web 界面失败：$error', 'Failed to open Web UI: $error'),
-        type: ToastType.error,
-      );
+      await AgentWebActionPresenter.invoke(action, english: _english);
     } finally {
       if (mounted && _busyPluginActionKey == key) {
         setState(() => _busyPluginActionKey = null);
@@ -867,13 +771,15 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
     final key = _pluginActionKey(action);
     final busy = _busyPluginActionKey == key;
     final disabled = _busyPluginActionKey != null;
-    final label = _localizedPluginValue(
-      action.presentation['label'],
-      action.displayName,
+    final label = action.localizedPresentationValue(
+      'label',
+      english: _english,
+      fallback: action.displayName,
     );
-    final description = _localizedPluginValue(
-      action.presentation['description'],
-      action.description,
+    final description = action.localizedPresentationValue(
+      'description',
+      english: _english,
+      fallback: action.description,
     );
     return _FlatTile(
       tileKey: Key('plugin-action-$key'),

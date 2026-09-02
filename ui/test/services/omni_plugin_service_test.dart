@@ -24,7 +24,16 @@ void main() {
               'description': 'Open Kimi Code Web',
               'presentation': <String, dynamic>{
                 'placement': 'agent_settings',
+                'placements': <String>[
+                  'agent_settings',
+                  'home_drawer_quick_launch',
+                ],
                 'packageId': 'kimi',
+                'quickLaunchOrder': 1,
+                'label': <String, String>{
+                  'zh': 'Kimi Code Web',
+                  'en': 'Kimi Code Web',
+                },
               },
             },
           ];
@@ -36,6 +45,20 @@ void main() {
     expect(actions.single.id, 'open_kimi_web');
     expect(actions.single.pluginId, 'com.omnimind.agent-web');
     expect(actions.single.presentation['packageId'], 'kimi');
+    expect(actions.single.supportsPlacement('agent_settings'), isTrue);
+    expect(
+      actions.single.supportsPlacement('home_drawer_quick_launch'),
+      isTrue,
+    );
+    expect(actions.single.quickLaunchOrder, 1);
+    expect(
+      actions.single.localizedPresentationValue(
+        'label',
+        english: false,
+        fallback: '',
+      ),
+      'Kimi Code Web',
+    );
   });
 
   test('invokes one scoped plugin action', () async {

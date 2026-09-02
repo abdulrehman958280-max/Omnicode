@@ -26,6 +26,14 @@ class AgentWebPluginTest {
 
         assertEquals(AgentWebActions.ids, actions.mapTo(linkedSetOf()) { it.id })
         assertTrue(actions.all { it.presentation["placement"].toString() == "\"agent_settings\"" })
+        assertTrue(
+            actions.all {
+                it.presentation["placements"].toString()
+                    .contains("\"home_drawer_quick_launch\"")
+            },
+        )
+        assertTrue(actions.all { it.presentation["agentId"] != null })
+        assertTrue(actions.all { it.presentation["shortLabel"] != null })
         assertTrue(actions.all { it.ownerPluginId == null })
         assertFalse(actions.toString().contains("--no-open"))
         assertFalse(actions.toString().contains("token="))
