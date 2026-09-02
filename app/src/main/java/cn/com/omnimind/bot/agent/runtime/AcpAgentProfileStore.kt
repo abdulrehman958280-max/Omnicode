@@ -143,7 +143,7 @@ internal const val DEEPSEEK_HARNESS_PNPM_VERSION = "11.22.0"
 internal const val DEEPSEEK_HARNESS_NODE_ENTRYPOINT =
     "/root/.npm-global/lib/node_modules/@deepseek-ai/dsh/lib/bin.js"
 internal const val DEEPSEEK_HARNESS_PREPARATION_REVISION =
-    "deepseek-dsh-profile-copy-v12"
+    "deepseek-dsh-profile-reset-v13"
 private const val DEEPSEEK_HARNESS_NPM_PRIMARY_REGISTRY =
     "https://registry.npmmirror.com"
 private const val DEEPSEEK_HARNESS_NPM_FALLBACK_REGISTRY =
@@ -170,18 +170,21 @@ internal const val DEEPSEEK_HARNESS_NATIVE_HEALTH_COMMAND =
         "command -v pnpm >/dev/null 2>&1 && " +
         "test -f /root/.dsh/omnibot-acp/profiles/acp/package.json && " +
         "test -f /root/.dsh/omnibot-acp/profiles/acp/node_modules/@openma/deepseek-harness-acp/package.json && " +
+        "test -f /root/.dsh/omnibot-acp/profiles/acp/node_modules/@openma/deepseek-harness-acp/dist/plugin.js && " +
+        "test ! -L /root/.dsh/omnibot-acp/profiles/acp/node_modules/@openma/deepseek-harness-acp/dist/plugin.js && " +
+        "test -f /root/.dsh/omnibot-acp/profiles/acp/node_modules/@openma/deepseek-harness-acp/dist/stdio.js && " +
+        "test ! -L /root/.dsh/omnibot-acp/profiles/acp/node_modules/@openma/deepseek-harness-acp/dist/stdio.js && " +
         "grep -Eq '^[[:space:]]*nodeLinker:[[:space:]]*hoisted[[:space:]]*$' " +
         "/root/.dsh/omnibot-acp/profiles/acp/pnpm-workspace.yaml && " +
         "grep -Eq '^[[:space:]]*packageImportMethod:[[:space:]]*copy[[:space:]]*$' " +
         "/root/.dsh/omnibot-acp/profiles/acp/pnpm-workspace.yaml && " +
         "node -e \"require('/root/.npm-global/lib/node_modules/@deepseek-ai/dsh/node_modules/node-pty')\" >/dev/null 2>&1 && " +
-        // Do not invoke `dsh --help`/`--dump-config` from a health probe:
-        // both bootstrap the vendor ACP process under Android proot and can
-        // fail merely because the hidden probe has no /proc/self/fd handles.
-        // The profile graph and adapter package are the non-invasive health
-        // boundary; the real dsh ACP launch is validated by initialize.
+        // This read-only probe verifies the installed profile shape. Importing
+        // the adapter directly is invalid because its modules deliberately
+        // resolve DSH packages supplied by the Harness host. The installer
+        // performs the stronger host-level `dsh --dump-config` validation.
         "cd /root/.dsh/omnibot-acp/profiles/acp && " +
-        "node --input-type=module -e \"import fs from 'node:fs'; const profile=JSON.parse(fs.readFileSync('package.json','utf8')); const bundles=profile?.dsh?.profile?.bundles; if (!Array.isArray(bundles) || !bundles.includes('@openma/deepseek-harness-acp')) process.exit(1); await import('@openma/deepseek-harness-acp/plugin'); await import('@openma/deepseek-harness-acp/stdio');\" >/dev/null 2>&1"
+        "node --input-type=module -e \"import fs from 'node:fs'; const profile=JSON.parse(fs.readFileSync('package.json','utf8')); const bundles=profile?.dsh?.profile?.bundles; if (!Array.isArray(bundles) || !bundles.includes('@openma/deepseek-harness-acp')) process.exit(1);\" >/dev/null 2>&1"
 internal val DEEPSEEK_HARNESS_NPM_INSTALL_COMMAND = """
     set -eu
     export PATH="/root/.npm-global/bin:${'$'}PATH"
@@ -296,6 +299,17 @@ internal val DEEPSEEK_HARNESS_NPM_INSTALL_COMMAND = """
       fi
     fi
     node -e "require('${'$'}DSH_PACKAGE_ROOT/node_modules/node-pty')" >/dev/null 2>&1
+    PROFILE_LAYOUT_MARKER="${'$'}DSH_HOME/.omnibot-profile-reset-v13"
+    profile_was_reset=0
+    # Profiles created before copy imports were enabled contain PRoot's
+    # `.l2s...0001 -> ...0002` hard-link emulation. pnpm reports those files
+    # as already installed and will not rewrite them. This DSH_HOME is owned by
+    # OmniBot, so rebuild its profile once for this layout revision; the marker
+    # preserves later user-installed plugins and commands on normal retries.
+    if [ ! -f "${'$'}PROFILE_LAYOUT_MARKER" ]; then
+      rm -rf "${'$'}DSH_HOME/profiles"
+      profile_was_reset=1
+    fi
     configure_dsh_profile_pnpm() {
       profile_root="${'$'}DSH_HOME/profiles/acp"
       [ -f "${'$'}profile_root/pnpm-workspace.yaml" ] || return 0
@@ -306,7 +320,8 @@ internal val DEEPSEEK_HARNESS_NPM_INSTALL_COMMAND = """
       )
     }
     dsh_acp_profile_is_healthy() {
-      $DEEPSEEK_HARNESS_NATIVE_HEALTH_COMMAND
+      $DEEPSEEK_HARNESS_NATIVE_HEALTH_COMMAND &&
+        timeout 30 dsh-acp-android --profile acp --dump-config >/dev/null 2>&1
     }
     install_dsh_acp_adapter() {
       registry="${'$'}1"
@@ -341,7 +356,10 @@ internal val DEEPSEEK_HARNESS_NPM_INSTALL_COMMAND = """
     # incompatible plugin must be reported by ACP initialize/health instead of
     # being silently destroyed by the host.
     test -f "${'$'}DSH_HOME/profiles/acp/package.json"
-    $DEEPSEEK_HARNESS_NATIVE_HEALTH_COMMAND
+    dsh_acp_profile_is_healthy
+    if [ "${'$'}profile_was_reset" -eq 1 ]; then
+      : > "${'$'}PROFILE_LAYOUT_MARKER"
+    fi
 """.trimIndent()
 
 /**

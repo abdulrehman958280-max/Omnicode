@@ -557,6 +557,12 @@ class AgentRuntimeProtocolPayloadTest {
         assertTrue(DEEPSEEK_HARNESS_NPM_INSTALL_COMMAND.contains("profiles/acp/package.json"))
         assertTrue(DEEPSEEK_HARNESS_NPM_INSTALL_COMMAND.contains("pnpm@$DEEPSEEK_HARNESS_PNPM_VERSION"))
         assertTrue(DEEPSEEK_HARNESS_NPM_INSTALL_COMMAND.contains("PNPM_CONFIG_PACKAGE_IMPORT_METHOD=copy"))
+        assertTrue(DEEPSEEK_HARNESS_NPM_INSTALL_COMMAND.contains("PROFILE_LAYOUT_MARKER"))
+        assertTrue(
+            DEEPSEEK_HARNESS_NPM_INSTALL_COMMAND.contains(
+                "timeout 30 dsh-acp-android --profile acp --dump-config"
+            )
+        )
         assertTrue(
             DEEPSEEK_HARNESS_NPM_INSTALL_COMMAND.contains(
                 "pnpm config set --location=project packageImportMethod copy"
