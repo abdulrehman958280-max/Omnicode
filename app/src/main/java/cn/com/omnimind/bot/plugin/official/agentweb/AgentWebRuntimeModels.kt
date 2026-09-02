@@ -5,6 +5,9 @@ import cn.com.omnimind.baselib.llm.OpenAiWireApi
 import cn.com.omnimind.baselib.llm.ProviderCustomHeaderUtils
 import cn.com.omnimind.bot.agent.runtime.AgentProviderCredentials
 import cn.com.omnimind.bot.agent.runtime.DEEPSEEK_HARNESS_NODE_ENTRYPOINT
+import cn.com.omnimind.bot.agent.runtime.KIMI_CODE_NATIVE_HEALTH_COMMAND
+import cn.com.omnimind.bot.agent.runtime.KIMI_CODE_NPM_INSTALL_COMMAND
+import cn.com.omnimind.bot.agent.runtime.buildKimiCodeEnvironment
 import java.net.URI
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -12,18 +15,6 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
-
-internal const val KIMI_CODE_NPM_PACKAGE_SPEC = "@moonshot-ai/kimi-code@latest"
-internal const val KIMI_CODE_NPM_INSTALL_COMMAND =
-    "npm install -g --no-audit --no-fund --prefix /root/.npm-global " +
-        "--registry=https://registry.npmmirror.com $KIMI_CODE_NPM_PACKAGE_SPEC || " +
-        "npm install -g --no-audit --no-fund --prefix /root/.npm-global " +
-        KIMI_CODE_NPM_PACKAGE_SPEC
-internal const val KIMI_CODE_NATIVE_HEALTH_COMMAND =
-    "PATH=/root/.npm-global/bin:\$PATH; export PATH; " +
-        "command -v kimi >/dev/null 2>&1 && " +
-        "node -e 'const [major, minor] = process.versions.node.split(\".\").map(Number); " +
-        "if (major < 22 || (major === 22 && minor < 19)) process.exit(1)'"
 
 internal const val DEEPSEEK_HARNESS_WEB_HOME = "/root/.dsh/omnibot-web"
 internal const val DEEPSEEK_HARNESS_WEB_PATCH_PATH =
@@ -164,7 +155,7 @@ internal fun buildAgentWebLaunchConfiguration(
     val managedFiles: Map<String, String>
     when (service) {
         AgentWebService.KIMI -> {
-            environment = buildKimiEnvironment(
+            environment = buildKimiCodeEnvironment(
                 provider = credentials,
                 model = modelId,
                 reasoningEffort = reasoningEffort,
@@ -225,48 +216,6 @@ private fun AgentProviderCredentials.normalizedForAgentWeb(): AgentProviderCrede
             .mapValues { (_, value) -> value.trim() }
             .filter { (key, value) -> key.isNotEmpty() && value.isNotEmpty() },
     )
-}
-
-private fun buildKimiEnvironment(
-    provider: AgentProviderCredentials,
-    model: String,
-    reasoningEffort: String?,
-): Map<String, String> {
-    require(!OpenAiWireApi.isResponses(provider.wireApi)) {
-        "Kimi Code's KIMI_MODEL_* channel does not support the OpenAI Responses wire API."
-    }
-    val providerType = resolveKimiProviderType(provider)
-    val effort = reasoningEffort?.trim()?.lowercase()?.takeIf(String::isNotEmpty)
-    require(effort == null || effort in KIMI_REASONING_EFFORTS) {
-        "Kimi Code reasoning effort must be low, medium, high, xhigh, or max."
-    }
-    return linkedMapOf(
-        "KIMI_CODE_HOME" to "/root/.kimi-code/omnibot",
-        "KIMI_CODE_NO_AUTO_UPDATE" to "1",
-        "KIMI_DISABLE_TELEMETRY" to "1",
-        "KIMI_MODEL_NAME" to model,
-        "KIMI_MODEL_API_KEY" to provider.apiKey,
-        "KIMI_MODEL_BASE_URL" to if (providerType == "anthropic") {
-            provider.baseUrl
-        } else {
-            normalizeKimiCodeBaseUrl(provider.baseUrl)
-        },
-        "KIMI_MODEL_PROVIDER_TYPE" to providerType,
-        "KIMI_MODEL_CAPABILITIES" to buildList {
-            if (agentWebVisionInputSupport(provider, model) != false) add("image_in")
-            add("thinking")
-        }.joinToString(","),
-    ).apply {
-        effort?.let { put("KIMI_MODEL_THINKING_EFFORT", it) }
-        if (provider.customHeaders.isNotEmpty()) {
-            put(
-                "KIMI_CODE_CUSTOM_HEADERS",
-                provider.customHeaders.entries.joinToString("\n") { (key, value) ->
-                    "$key: $value"
-                },
-            )
-        }
-    }
 }
 
 private fun buildDeepSeekEnvironment(provider: AgentProviderCredentials): Map<String, String> {
@@ -385,16 +334,6 @@ private fun resolveDeepSeekHarnessRoute(provider: AgentProviderCredentials): Str
     }
 }
 
-private fun resolveKimiProviderType(provider: AgentProviderCredentials): String {
-    if (provider.protocolType == "anthropic") return "anthropic"
-    val host = runCatching { URI(provider.baseUrl).host?.lowercase() }.getOrNull().orEmpty()
-    return if (host in KIMI_API_HOSTS) "kimi" else "openai"
-}
-
-/** Kimi expects an API root, while Provider entries may store a full endpoint. */
-internal fun normalizeKimiCodeBaseUrl(baseUrl: String): String =
-    normalizeOpenAiApiBaseUrl(baseUrl)
-
 private fun normalizeOpenAiApiBaseUrl(baseUrl: String): String {
     var normalized = baseUrl.trim().trimEnd('/')
     listOf(
@@ -415,7 +354,6 @@ private fun normalizeOpenAiApiBaseUrl(baseUrl: String): String {
     return "$normalized/v1"
 }
 
-private val KIMI_REASONING_EFFORTS = setOf("low", "medium", "high", "xhigh", "max")
 private val DEEPSEEK_REASONING_EFFORTS = listOf(
     "off",
     "minimal",
@@ -425,4 +363,3 @@ private val DEEPSEEK_REASONING_EFFORTS = listOf(
     "xhigh",
     "max",
 )
-private val KIMI_API_HOSTS = setOf("api.kimi.com", "api.moonshot.ai", "api.moonshot.cn")

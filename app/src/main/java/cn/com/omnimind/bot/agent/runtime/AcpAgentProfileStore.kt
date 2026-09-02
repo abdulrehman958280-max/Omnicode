@@ -688,6 +688,7 @@ internal class AcpAgentProfileStore(context: Context) {
     companion object {
         const val CODEX_AGENT_ID = "codex-acp"
         const val DEEPSEEK_HARNESS_AGENT_ID = "deepseek-harness-acp"
+        const val KIMI_CODE_AGENT_ID = "kimi-code-acp"
         const val XIAOWAN_AGENT_ID = "xiaowan-acp"
         const val DEFAULT_AGENT_ID = XIAOWAN_AGENT_ID
 
@@ -700,10 +701,11 @@ internal class AcpAgentProfileStore(context: Context) {
                 builtIn = true
             ),
             AcpAgentProfile(
-                id = CODEX_AGENT_ID,
-                name = "Codex",
-                description = "OpenAI Codex through its managed ACP adapter",
-                command = "codex-acp",
+                id = KIMI_CODE_AGENT_ID,
+                name = "Kimi Code",
+                description = "Kimi Code through its official ACP interface",
+                command = "kimi",
+                arguments = listOf("acp"),
                 builtIn = true
             ),
             AcpAgentProfile(
@@ -711,6 +713,13 @@ internal class AcpAgentProfileStore(context: Context) {
                 name = "Claude Code",
                 description = "Claude Code through the ACP adapter",
                 command = "claude-agent-acp",
+                builtIn = true
+            ),
+            AcpAgentProfile(
+                id = CODEX_AGENT_ID,
+                name = "Codex",
+                description = "OpenAI Codex through its managed ACP adapter",
+                command = "codex-acp",
                 builtIn = true
             ),
             AcpAgentProfile(
@@ -734,6 +743,16 @@ internal class AcpAgentProfileStore(context: Context) {
         private val OFFICIAL_AGENT_IDS = OFFICIAL_AGENTS.mapTo(linkedSetOf()) { it.id }
         private val RETIRED_AGENT_IDS = setOf("gemini-cli-acp")
         private val OFFICIAL_RUNTIMES = mapOf(
+            KIMI_CODE_AGENT_ID to AcpOfficialRuntime(
+                discoveryCommand = "kimi",
+                managedAdapterPackage = KIMI_CODE_NPM_PACKAGE_SPEC,
+                managedAdapterHealthCommand = KIMI_CODE_NATIVE_HEALTH_COMMAND,
+                harnessAdapter = AcpHarnessAdapters.kimiCode,
+                usesSharedProvider = true,
+                terminalPackageId = "kimi",
+                managedInstallCommand = KIMI_CODE_NPM_INSTALL_COMMAND,
+                preparationRevision = "kimi-code-acp-v1",
+            ),
             CODEX_AGENT_ID to AcpOfficialRuntime(
                 discoveryCommand = "codex",
                 managedAdapterPackage = "@openai/codex@latest",

@@ -2,8 +2,8 @@ package com.ai.assistance.operit.terminal.setup
 
 import cn.com.omnimind.bot.agent.runtime.DEEPSEEK_HARNESS_NPM_INSTALL_COMMAND
 import cn.com.omnimind.bot.agent.runtime.DEEPSEEK_HARNESS_NATIVE_HEALTH_COMMAND
-import cn.com.omnimind.bot.plugin.official.agentweb.KIMI_CODE_NATIVE_HEALTH_COMMAND
-import cn.com.omnimind.bot.plugin.official.agentweb.KIMI_CODE_NPM_INSTALL_COMMAND
+import cn.com.omnimind.bot.agent.runtime.KIMI_CODE_NATIVE_HEALTH_COMMAND
+import cn.com.omnimind.bot.agent.runtime.KIMI_CODE_NPM_INSTALL_COMMAND
 import com.ai.assistance.operit.terminal.utils.SourceManager
 import com.rk.terminal.runtime.UbuntuRepositoryManager
 import com.rk.terminal.ui.screens.settings.WorkingMode
