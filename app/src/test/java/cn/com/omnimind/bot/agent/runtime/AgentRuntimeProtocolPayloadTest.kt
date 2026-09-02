@@ -553,9 +553,15 @@ class AgentRuntimeProtocolPayloadTest {
         assertTrue(MANAGED_NATIVE_BUILD_PREREQUISITES_COMMAND.contains("apk fix --no-cache"))
         assertTrue(MANAGED_NATIVE_BUILD_PREREQUISITES_COMMAND.contains("apk fix --no-cache --upgrade"))
         assertTrue(MANAGED_NATIVE_BUILD_PREREQUISITES_COMMAND.contains("build-essential python3"))
-        assertTrue(DEEPSEEK_HARNESS_NPM_INSTALL_COMMAND.contains("dsh plugin --profile acp add"))
+        assertTrue(DEEPSEEK_HARNESS_NPM_INSTALL_COMMAND.contains("dsh plugin --profile acp add -w"))
         assertTrue(DEEPSEEK_HARNESS_NPM_INSTALL_COMMAND.contains("profiles/acp/package.json"))
         assertTrue(DEEPSEEK_HARNESS_NPM_INSTALL_COMMAND.contains("pnpm@$DEEPSEEK_HARNESS_PNPM_VERSION"))
+        assertTrue(DEEPSEEK_HARNESS_NPM_INSTALL_COMMAND.contains("PNPM_CONFIG_PACKAGE_IMPORT_METHOD=copy"))
+        assertTrue(
+            DEEPSEEK_HARNESS_NPM_INSTALL_COMMAND.contains(
+                "pnpm config set --location=project packageImportMethod copy"
+            )
+        )
         assertTrue(
             DEEPSEEK_HARNESS_NPM_INSTALL_COMMAND.contains("DSH_HOME=\"/root/.dsh/omnibot-acp\"")
         )
