@@ -62,9 +62,23 @@ class AgentWebRuntimeTest {
     }
 
     @Test
-    fun `DeepSeek parser preserves its process token`() {
+    fun `DeepSeek parser accepts current bare URL and future process token`() {
         val token = "dsh_process_token_1234567890abcdef"
         val authenticated = "http://localhost:3080/?token=$token"
+        assertEquals(
+            "http://127.0.0.1:3080",
+            AgentWebTranscriptParser.findUrl(
+                AgentWebUrlKind.DEEPSEEK_HARNESS,
+                "dsh web: http://127.0.0.1:3080\n",
+            ),
+        )
+        assertEquals(
+            "http://[::1]:3080/",
+            AgentWebTranscriptParser.findUrl(
+                AgentWebUrlKind.DEEPSEEK_HARNESS,
+                "dsh web: http://[::1]:3080/\n",
+            ),
+        )
         assertEquals(
             authenticated,
             AgentWebTranscriptParser.findUrl(
@@ -75,7 +89,13 @@ class AgentWebRuntimeTest {
         assertNull(
             AgentWebTranscriptParser.findUrl(
                 AgentWebUrlKind.DEEPSEEK_HARNESS,
-                "dsh web: http://127.0.0.1:3080\n",
+                "dsh web: http://127.0.0.1:3080/?debug=true\n",
+            ),
+        )
+        assertNull(
+            AgentWebTranscriptParser.findUrl(
+                AgentWebUrlKind.DEEPSEEK_HARNESS,
+                "dsh web: http://127.0.0.1:3080/#token=$token\n",
             ),
         )
         assertNull(

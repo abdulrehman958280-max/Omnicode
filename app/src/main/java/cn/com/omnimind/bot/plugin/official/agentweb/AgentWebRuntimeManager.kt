@@ -35,7 +35,7 @@ internal interface AgentWebController {
  * Owns the process lifecycle for vendor Web UIs without creating an ACP
  * session, turn, or presentation stream. A named ReTerminal process is the
  * lifecycle authority; this class only serializes transitions and opens the
- * authenticated loopback URL published by that process.
+ * validated loopback URL published by that process.
  */
 internal class AgentWebRuntimeManager(
     private val gateway: AgentWebRuntimeGateway,
@@ -271,7 +271,7 @@ internal class AgentWebRuntimeManager(
             failure(
                 service,
                 AgentWebResultCode.URL_TIMEOUT,
-                "${service.displayName} did not publish an authenticated local URL in time.",
+                "${service.displayName} did not publish a supported local URL in time.",
                 reused = reused,
             )
         } else {
@@ -459,7 +459,7 @@ internal class AndroidAgentWebRuntimeGateway(context: Context) : AgentWebRuntime
     }
 }
 
-/** Parses only authenticated URLs on the local loopback interface. */
+/** Parses only service-appropriate URLs on the local loopback interface. */
 internal object AgentWebTranscriptParser {
     private val ansiEscapeRegex = Regex("\\u001B\\[[0-?]*[ -/]*[@-~]")
     private val configurationRegex = Regex(
@@ -505,7 +505,8 @@ internal object AgentWebTranscriptParser {
             }
             AgentWebUrlKind.DEEPSEEK_HARNESS -> {
                 val query = uri.rawQuery
-                uri.rawFragment == null && query?.matches(tokenFragmentRegex) == true
+                uri.rawFragment == null &&
+                    (query == null || query.matches(tokenFragmentRegex))
             }
         }
     }

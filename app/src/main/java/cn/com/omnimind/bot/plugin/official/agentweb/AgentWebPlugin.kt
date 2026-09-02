@@ -27,19 +27,19 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
-/** Built-in plugin boundary for authenticated local Agent Web surfaces. */
+/** Built-in plugin boundary for validated local Agent Web surfaces. */
 internal class AgentWebPluginProvider(private val context: Context) : OmniPluginProvider {
     override val descriptor = OmniPluginDescriptor(
         id = ID,
         name = "Agent Web",
         version = "1.0.0",
-        description = "Open and manage authenticated local Web UIs for installed Agent runtimes.",
+        description = "Open and manage validated local Web UIs for installed Agent runtimes.",
         publisher = "OmniMind",
         kind = OmniPluginKind.BUNDLED_MODULE,
         capabilities = listOf(
             "Kimi Code Web",
             "DeepSeek Harness Web",
-            "Authenticated loopback handoff",
+            "Validated loopback handoff",
         ),
         required = true,
         presentation = buildJsonObject {
@@ -117,7 +117,7 @@ internal object AgentWebTools {
             name = OPEN_DEEPSEEK,
             displayName = "Open DeepSeek Harness Web",
             description = "Open the installed DeepSeek Harness Web UI in the system browser. " +
-                "Call only after the user explicitly asks to open it. The authenticated URL " +
+                "Call only after the user explicitly asks to open it. The loopback URL " +
                 "remains inside the native host and is never returned.",
             efforts = listOf("off", "minimal", "low", "medium", "high", "xhigh", "max"),
         ),
