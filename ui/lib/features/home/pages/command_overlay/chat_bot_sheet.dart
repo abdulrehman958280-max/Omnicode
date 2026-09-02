@@ -755,12 +755,26 @@ class _ChatBotSheetState extends State<ChatBotSheet>
     _acpCloseStarted = true;
     if (_hasLiveAcpTurn) {
       try {
-        await AgentRuntimeService.cancelPrompt(
+        final response = await AgentRuntimeService.cancelPrompt(
           sessionId: sessionId,
           conversationId: conversationId,
           promptId: _acpPromptId,
           runId: _currentDispatchTurnId,
         );
+        final runtime = _runtimeCoordinator.runtimeFor(
+          conversationId: conversationId,
+          mode: _runtimeMode,
+        );
+        if (runtime?.isAiResponding == true) {
+          _runtimeCoordinator.applyAcpPromptResponse(
+            conversationId: conversationId,
+            mode: _runtimeMode,
+            sessionId: response['sessionId']?.toString() ?? sessionId,
+            turnId: response['turnId']?.toString() ?? _acpPromptId,
+            stopReason: 'cancelled',
+            conversation: _currentConversation,
+          );
+        }
       } catch (error) {
         debugPrint('ACP 取消请求失败: $error');
       }
@@ -1383,8 +1397,39 @@ class _ChatBotSheetState extends State<ChatBotSheet>
       _acpPromptId = (response['promptId'] ?? response['turnId'])
           ?.toString()
           .trim();
+      if (conversationId != null) {
+        _runtimeCoordinator.applyAcpPromptResponse(
+          conversationId: conversationId,
+          mode: _runtimeMode,
+          sessionId: _acpSessionId,
+          turnId: _acpPromptId,
+          stopReason:
+              response['stopReason']?.toString() ??
+              response['status']?.toString(),
+          error: response['error']?.toString(),
+          conversation: _currentConversation,
+        );
+      }
       return true;
     } catch (e) {
+      final conversationId = _currentConversationId;
+      final runtime = conversationId == null
+          ? null
+          : _runtimeCoordinator.runtimeFor(
+              conversationId: conversationId,
+              mode: _runtimeMode,
+            );
+      if (conversationId != null && runtime?.isAiResponding == true) {
+        _runtimeCoordinator.applyAcpPromptResponse(
+          conversationId: conversationId,
+          mode: _runtimeMode,
+          sessionId: runtime?.activeAcpSessionId ?? _acpSessionId,
+          turnId: runtime?.activeAcpTurnId ?? _acpPromptId,
+          stopReason: 'error',
+          error: e.toString(),
+          conversation: _currentConversation,
+        );
+      }
       debugPrint('Agent flow error: $e');
       return false;
     }

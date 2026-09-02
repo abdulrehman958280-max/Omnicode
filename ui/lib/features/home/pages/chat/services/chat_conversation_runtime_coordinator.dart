@@ -691,12 +691,64 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
     return result;
   }
 
+  /// Applies the terminal result returned by the official ACP
+  /// `session/prompt` request through the same reducer and persistence path as
+  /// streamed `session/update` notifications. This is the canonical terminal
+  /// boundary; host code must not synthesize a private `turn/*` event merely
+  /// because a MethodChannel result is not an EventChannel notification.
+  AgentReduceResult applyAcpPromptResponse({
+    required int conversationId,
+    required String? sessionId,
+    String? turnId,
+    String? stopReason,
+    String? error,
+    String mode = kChatRuntimeModeAgent,
+    ConversationModel? conversation,
+  }) {
+    ensureInitialized();
+    final runtime = ensureRuntime(
+      conversationId: conversationId,
+      mode: mode,
+      conversation: conversation,
+      initialChatIslandDisplayLayer: ChatIslandDisplayLayer.mode,
+    );
+    final result = _agentEventReducer.reducePromptResponse(
+      runtime: runtime,
+      sessionId: sessionId,
+      turnId: turnId,
+      stopReason: stopReason,
+      error: error,
+    );
+    final taskId = runtime.resolveAcpEventRunId(
+      sessionId: sessionId,
+      turnId: result.turnId,
+      fallback: runtime.activeRunId ?? runtime.currentDispatchTurnId,
+    );
+    if (taskId != null) {
+      final binding = _taskBindings[taskId];
+      if (binding?.conversationId == conversationId && binding?.mode == mode) {
+        _taskBindings.remove(taskId);
+      }
+    }
+    if (result.handled) {
+      notifyListeners();
+      if (!isEphemeralRuntime(conversationId: conversationId, mode: mode)) {
+        schedulePersistRuntimeConversation(
+          conversationId: conversationId,
+          mode: mode,
+          persistMessages: true,
+          delay: Duration.zero,
+        );
+      }
+    }
+    return result;
+  }
+
   bool _isTerminalAcpBindingEvent(String? method, Map<String, dynamic> event) {
     switch (method) {
       case 'turn/completed':
       case 'turn/failed':
       case 'thread/closed':
-      case 'codex/disconnected':
         return true;
       case 'thread/status/changed':
         final params = _eventParams(event);

@@ -83,7 +83,6 @@ internal class RemoteCodexInboundEventQueue(
     suspend fun close() {
         terminal.set(true)
         events.close()
-        drainJob.cancel()
         drainJob.join()
     }
 }

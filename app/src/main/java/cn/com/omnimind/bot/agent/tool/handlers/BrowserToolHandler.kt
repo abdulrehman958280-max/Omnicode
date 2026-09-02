@@ -39,7 +39,7 @@ class BrowserToolHandler(
         val toolName = "browser_use"
         return try {
             helper.requireWorkspaceStorageAccess(callback)?.let { return it }
-            val request = BrowserUseRequest.fromJson(args)
+            val request = BrowserUseRequest.fromJson(args, env.runtimeSettings)
             val engine = LiveAgentBrowserSessionManager.acquireEngine(
                 context = helper.context,
                 workspaceManager = workspaceManager,

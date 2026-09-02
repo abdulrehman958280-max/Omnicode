@@ -283,8 +283,8 @@ object AgentToolDefinitions {
             "Optional session name. Generated automatically when omitted.",
         "可选，会话初始工作目录。默认使用当前 workspace cwd。" to
             "Optional initial working directory for the session. Defaults to the current workspace cwd.",
-        "向已有 {{OMNIBOT_TERMINAL_DISTRIBUTION}} session 发送一条非交互命令，并等待该命令完成。只在你明确想复用同一个 session 的 cwd、环境变量、后台任务或中间状态时使用。若命令会持续运行很久（例如启动 node/python 服务），应设置较短 timeoutSeconds，让工具尽快返回，再用 terminal_session_read 追踪输出，并在不再需要时调用 terminal_session_stop。" to
-            "Send a non-interactive command to an existing {{OMNIBOT_TERMINAL_DISTRIBUTION}} session and wait for that command to finish. Use this only when you explicitly want to reuse the same session's cwd, environment variables, background jobs, or intermediate state. If the command may run for a long time, such as starting a node or Python service, use a shorter timeout so the tool returns quickly, then monitor output with `terminal_session_read` and stop the session with `terminal_session_stop` when finished.",
+        "向已有 {{OMNIBOT_TERMINAL_DISTRIBUTION}} session 发送一条非交互命令，并等待终端真实报告该命令完成。只在你明确想复用同一个 session 的 cwd、环境变量、后台任务或中间状态时使用。长时间运行的命令保持在当前 ACP tool call 中，用户需要停止时取消当前 ACP turn 或调用 terminal_session_stop。" to
+            "Send a non-interactive command to an existing {{OMNIBOT_TERMINAL_DISTRIBUTION}} session and wait for the terminal to report completion. Use this only when you explicitly want to reuse the same session's cwd, environment variables, background jobs, or intermediate state. Long-running commands remain in the current ACP tool call; cancel the current ACP turn or call `terminal_session_stop` when the user wants to stop.",
         "执行后等待结果，再判断是否继续读取日志、再次执行或结束 session。" to
             "Wait for the result after execution, then decide whether to read logs, run another command, or stop the session.",
         "terminal_session_start 返回的 sessionId。" to
@@ -560,7 +560,7 @@ object AgentToolDefinitions {
                     }
                     putJsonObject("limit") {
                         put("type", "integer")
-                        put("description", "返回工具数量上限，默认 8，范围 1-20。")
+                        put("description", "可选：限制返回工具数量；不填写则返回全部匹配工具。")
                     }
                 }
                 putJsonArray("required") {
@@ -1097,7 +1097,7 @@ object AgentToolDefinitions {
             put("name", "terminal_session_exec")
             put("displayName", "执行 {{OMNIBOT_TERMINAL_DISTRIBUTION}} 会话命令")
             put("toolType", "terminal")
-            put("description", "向已有 {{OMNIBOT_TERMINAL_DISTRIBUTION}} session 发送一条非交互命令，并等待该命令完成。只在你明确想复用同一个 session 的 cwd、环境变量、后台任务或中间状态时使用。若命令会持续运行很久（例如启动 node/python 服务），应设置较短 timeoutSeconds，让工具尽快返回，再用 terminal_session_read 追踪输出，并在不再需要时调用 terminal_session_stop。")
+            put("description", "向已有 {{OMNIBOT_TERMINAL_DISTRIBUTION}} session 发送一条非交互命令，并等待终端真实报告该命令完成。只在你明确想复用同一个 session 的 cwd、环境变量、后台任务或中间状态时使用。长时间运行的命令保持在当前 ACP tool call 中，用户需要停止时取消当前 ACP turn 或调用 terminal_session_stop。")
             put("postToolRule", "执行后等待结果，再判断是否继续读取日志、再次执行或结束 session。")
             putJsonObject("parameters") {
                 put("type", "object")
@@ -1113,10 +1113,6 @@ object AgentToolDefinitions {
                     putJsonObject("workingDirectory") {
                         put("type", "string")
                         put("description", "可选，本次命令执行前要切换到的目录。")
-                    }
-                    putJsonObject("timeoutSeconds") {
-                        put("type", "integer")
-                        put("description", "等待该命令完成的超时时间，默认 120 秒，范围 5-600。")
                     }
                 }
                 putJsonArray("required") {

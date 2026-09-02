@@ -78,6 +78,23 @@ class HttpControllerDeepSeekTest {
     }
 
     @Test
+    fun `official deepseek body disables thinking from canonical none effort`() {
+        val payload = applyOfficialDeepSeekThinkingMode(
+            """
+                {
+                  "model": "deepseek-v4-flash",
+                  "messages": [{"role": "user", "content": "hello"}],
+                  "reasoning_effort": "none"
+                }
+            """.trimIndent()
+        )
+
+        val root = json.parseToJsonElement(payload).jsonObject
+        assertEquals("disabled", root["thinking"]?.jsonObject?.get("type")?.jsonPrimitive?.content)
+        assertFalse(root.containsKey("reasoning_effort"))
+    }
+
+    @Test
     fun `official deepseek body maps xhigh effort to high`() {
         val payload = applyOfficialDeepSeekThinkingMode(
             """
@@ -112,6 +129,23 @@ class HttpControllerDeepSeekTest {
         assertFalse(v4.supportsExplicitAutoToolChoice)
         assertTrue(v4.requiresReasoningContentForToolCalls)
         assertFalse(v4.requiresAnthropicThinkingReplay)
+        assertFalse(v4.supportsResponsesPromptCacheKey)
+        assertFalse(v4.supportsResponsesParallelToolCalls)
+        assertFalse(v4.supportsVisionInput == true)
+
+        val vision = DeepSeekProvider.requestCapabilities(
+            protocolType = "deepseek",
+            apiBase = "https://api.deepseek.com",
+            model = "deepseek-v4-flash-vision-exp",
+        )
+        assertTrue(vision.supportsVisionInput == true)
+
+        val proxied = DeepSeekProvider.requestCapabilities(
+            protocolType = "deepseek",
+            apiBase = "https://proxy.example.com/v1",
+            model = "deepseek-v4-flash",
+        )
+        assertEquals(null, proxied.supportsVisionInput)
 
         val anthropic = DeepSeekProvider.requestCapabilities(
             protocolType = "anthropic",

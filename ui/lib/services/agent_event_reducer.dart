@@ -56,6 +56,77 @@ class AgentReduceResult {
 class AgentEventReducer {
   const AgentEventReducer();
 
+  /// Projects the terminal result of the official ACP `session/prompt`
+  /// request. PromptResponse is a request result rather than a
+  /// `session/update` notification, so it must enter this same reducer
+  /// instead of being converted into a private `turn/*` event.
+  AgentReduceResult reducePromptResponse({
+    required ChatConversationRuntimeState runtime,
+    required String? sessionId,
+    String? turnId,
+    String? stopReason,
+    String? error,
+  }) {
+    final normalizedSessionId = sessionId?.trim();
+    final normalizedTurnId = turnId?.trim().isNotEmpty == true
+        ? turnId!.trim()
+        : runtime.activeAcpTurnId?.trim();
+    final reason = stopReason?.trim().toLowerCase() ?? '';
+    final isCancelled = reason == 'cancelled' || reason == 'canceled';
+    final isFailure =
+        error?.trim().isNotEmpty == true ||
+        reason == 'error' ||
+        reason == 'failed' ||
+        reason == 'failure' ||
+        reason == 'timeout';
+    final taskId =
+        runtime.resolveAcpEventRunId(
+          sessionId: normalizedSessionId,
+          turnId: normalizedTurnId,
+          fallback:
+              runtime.activeRunId ??
+              runtime.currentDispatchTurnId ??
+              runtime.lastAgentTurnId,
+        ) ??
+        runtime.currentDispatchTurnId ??
+        runtime.lastAgentTurnId ??
+        normalizedTurnId ??
+        'agent-${runtime.conversationId}';
+    if (isFailure) {
+      final detail = error?.trim().isNotEmpty == true
+          ? error!.trim()
+          : (stopReason?.trim().isNotEmpty == true
+                ? stopReason!.trim()
+                : 'ACP session/prompt failed.');
+      _recordTurnFailure(
+        runtime,
+        taskId: taskId,
+        detail: formatAgentRuntimeErrorForUser(detail),
+        params: <String, dynamic>{
+          if (normalizedSessionId != null && normalizedSessionId.isNotEmpty)
+            'sessionId': normalizedSessionId,
+          if (normalizedTurnId != null && normalizedTurnId.isNotEmpty)
+            'turnId': normalizedTurnId,
+          if (stopReason != null) 'stopReason': stopReason,
+          'error': detail,
+        },
+      );
+    }
+    _completeTurn(
+      runtime,
+      taskId,
+      acpTurnId: normalizedTurnId,
+      appendCancelIfEmpty: isCancelled,
+      cancelled: isCancelled,
+    );
+    return AgentReduceResult(
+      handled: true,
+      method: 'session/prompt',
+      threadId: normalizedSessionId,
+      turnId: normalizedTurnId,
+    );
+  }
+
   AgentReduceResult reduce({
     required ChatConversationRuntimeState runtime,
     required Map<String, dynamic> event,
@@ -1478,32 +1549,6 @@ class AgentEventReducer {
       );
     }
 
-    if (method == 'codex/disconnected') {
-      // A remote bridge can disappear before it has a chance to send the
-      // normal turn/failed notification. Finalize the one active host turn
-      // here; otherwise the chat remains in "thinking" forever and the next
-      // prompt is rejected as a second active turn.
-      final taskId =
-          runtime.currentDispatchTurnId ??
-          runtime.lastAgentTurnId ??
-          runtime.activeRunId;
-      if (runtime.isAiResponding && taskId != null && taskId.isNotEmpty) {
-        _recordTurnFailure(
-          runtime,
-          taskId: taskId,
-          detail: 'Remote ACP bridge disconnected.',
-          params: params,
-        );
-        _completeTurn(runtime, taskId, appendCancelIfEmpty: false);
-      }
-      return AgentReduceResult(
-        handled: true,
-        method: method,
-        threadId: threadId,
-        turnId: turnId,
-      );
-    }
-
     if (method == 'account/updated' ||
         method == 'account/login/completed' ||
         method == 'account/rateLimits/updated' ||
@@ -1917,11 +1962,6 @@ class AgentEventReducer {
       content['agentErrorText'] = error;
     }
     content['agentRetryable'] = recovery['retryable'] == true;
-    content['agentContinueable'] = recovery['continueable'] == true;
-    final resumeMode = recovery['resumeMode'] ?? recovery['continueResumeMode'];
-    if (resumeMode != null) {
-      content['agentContinueResumeMode'] = resumeMode;
-    }
     final persistAsError = recovery['persistAsError'];
     runtime.messages[index] = existing.copyWith(
       content: content,

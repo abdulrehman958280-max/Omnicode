@@ -558,13 +558,13 @@ class XiaowanAcpPresentationBridgeTest {
         val namespace = (message._meta as JsonObject)["cn.com.omnimind.agent"] as JsonObject
         val recovery = namespace["recovery"] as JsonObject
         assertEquals("true", recovery["retryable"]?.jsonPrimitive?.content)
-        assertEquals("false", recovery["continueable"]?.jsonPrimitive?.content)
+        assertEquals(null, recovery["continueable"])
     }
 
     @Test
-    fun `partial error keeps recovery on the existing ACP assistant message`() = runBlocking {
+    fun `partial error does not advertise approximate ACP continuation`() = runBlocking {
         val updates = mutableListOf<SessionUpdate>()
-        val bridge = XiaowanAcpEventBridge(canContinue = true) { updates += it }
+        val bridge = XiaowanAcpEventBridge { updates += it }
 
         bridge.onChatMessage("半截答案", isFinal = false)
         bridge.onError("连接中断", retryable = true)
@@ -576,12 +576,9 @@ class XiaowanAcpPresentationBridgeTest {
         val namespace = (messages[1]._meta as JsonObject)["cn.com.omnimind.agent"] as JsonObject
         val recovery = namespace["recovery"] as JsonObject
         assertEquals("true", recovery["retryable"]?.jsonPrimitive?.content)
-        assertEquals("true", recovery["continueable"]?.jsonPrimitive?.content)
-        assertEquals("false", recovery["persistAsError"]?.jsonPrimitive?.content)
-        assertEquals(
-            "approximate",
-            recovery["continueResumeMode"]?.jsonPrimitive?.content,
-        )
+        assertEquals(null, recovery["continueable"])
+        assertEquals("true", recovery["persistAsError"]?.jsonPrimitive?.content)
+        assertEquals(null, recovery["continueResumeMode"])
     }
 
     @Test
@@ -863,7 +860,7 @@ class XiaowanAcpPresentationBridgeTest {
     }
 
     @Test
-    fun `clarification tool result uses ACP pending status`() = runBlocking {
+    fun `clarification tool result is terminal failure without a request channel`() = runBlocking {
         val updates = mutableListOf<SessionUpdate>()
         val bridge = XiaowanAcpEventBridge { updates += it }
 
@@ -878,7 +875,7 @@ class XiaowanAcpPresentationBridgeTest {
         )
 
         val completion = updates.filterIsInstance<SessionUpdate.ToolCallUpdate>().last()
-        assertEquals(ToolCallStatus.PENDING, completion.status)
+        assertEquals(ToolCallStatus.FAILED, completion.status)
         val rawOutput = completion.rawOutput as JsonObject
         assertEquals("确认执行高权限 shell 命令？", rawOutput["question"]?.jsonPrimitive?.content)
     }

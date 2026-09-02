@@ -145,7 +145,7 @@ class HttpAgentLlmClientTest {
             assertNull(visionRequest["thinking"])
             assertEquals("true", visionRequest["enable_thinking"]?.jsonPrimitive?.content)
             assertEquals(
-                1_024,
+                16_384,
                 visionRequest["max_completion_tokens"]?.jsonPrimitive?.content?.toInt(),
             )
             assertEquals(1, visionRequest["messages"]?.let { it as JsonArray }?.size)

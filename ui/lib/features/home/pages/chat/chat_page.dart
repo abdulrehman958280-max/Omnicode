@@ -272,7 +272,6 @@ abstract class _ChatPageStateBase extends State<ChatPage>
   StreamSubscription<Map<String, dynamic>>? _agentEventSubscription;
   StreamSubscription<Map<String, dynamic>>? _omniLinkEventSubscription;
   final Set<String> _pendingManualAgentRetryTaskIds = <String>{};
-  final Set<String> _pendingManualAgentContinueTaskIds = <String>{};
   bool _pendingAgentInputResponseInFlight = false;
   Timer? _remoteCodexSessionSyncTimer;
   bool _remoteCodexSessionSyncInFlight = false;
@@ -301,6 +300,7 @@ abstract class _ChatPageStateBase extends State<ChatPage>
   String? _normalAcpTurnId;
   String? _activeAgentModelId;
   String? _activeAgentReasoningEffort;
+  String? _agentReasoningEffortConfigId;
   String? _activeAgentCollaborationMode;
   final Set<String> _agentPlanTurnIds = <String>{};
   bool _isAgentModelListLoading = false;
@@ -1557,6 +1557,27 @@ abstract class _ChatPageStateBase extends State<ChatPage>
     );
   }
 
+  /// Routes the official ACP `session/cancel` result into the same shared
+  /// reducer used by `session/update` and `session/prompt`. Native code must
+  /// not emit a private terminal event just to make a cancelled spinner stop.
+  Future<void> cancelAcpPromptForMode({
+    required ChatPageMode mode,
+    String? sessionId,
+    String? turnId,
+  }) async {
+    final conversationId = _modeState(mode).currentConversationId;
+    if (conversationId == null) return;
+    try {
+      await AgentRuntimeService.cancelPrompt(
+        conversationId: conversationId,
+        sessionId: sessionId,
+        promptId: turnId,
+      );
+    } catch (error) {
+      debugPrint('ACP cancellation failed: $error');
+    }
+  }
+
   void handleAgentError(String error, {String? taskIdOverride}) {
     final runtime = _runtimeForMode(_activeMode);
     // The caller may have already detached the runtime task before the error
@@ -2086,8 +2107,6 @@ abstract class _ChatPageStateBase extends State<ChatPage>
   String? _mimeTypeFromExtension(String path, {String extension = ''});
 
   void _showSnackBar(String message);
-
-  Future<void> _launchAgentWeb(String agentId, {String? reasoningEffort});
 
   Future<bool> _ensureNormalChatModelConfigurationForSend();
 

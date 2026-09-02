@@ -60,6 +60,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -177,7 +178,10 @@ data class BrowserUseRequest(
     val scrollCount: Int = DEFAULT_BROWSER_SCROLL_COUNT
 ) {
     companion object {
-        fun fromJson(args: JsonObject): BrowserUseRequest {
+        fun fromJson(
+            args: JsonObject,
+            runtimeSettings: AgentRuntimeSettings = AgentRuntimeSettings(),
+        ): BrowserUseRequest {
             val toolTitle = args["tool_title"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
             require(toolTitle.isNotEmpty()) { "browser_use 缺少 tool_title" }
 
@@ -195,16 +199,19 @@ data class BrowserUseRequest(
                 ?.coerceIn(1, 20_000)
                 ?: DEFAULT_BROWSER_SCROLL_AMOUNT
             val maxDepth = args["max_depth"]?.jsonPrimitive?.intOrNull
-                ?.coerceIn(1, 8)
+                ?.takeIf { it > 0 }
+                ?: runtimeSettings.browserMaxDepth
                 ?: DEFAULT_BROWSER_MAX_DEPTH
             val scrollCount = args["scroll_count"]?.jsonPrimitive?.intOrNull
-                ?.coerceIn(1, MAX_BROWSER_SCROLL_COUNT)
+                ?.takeIf { it > 0 }
+                ?: runtimeSettings.browserMaxScrollCount
                 ?: DEFAULT_BROWSER_SCROLL_COUNT
             val fuzzy = args["fuzzy"]?.jsonPrimitive?.booleanOrNull ?: true
             val readImage = args["read_image"]?.jsonPrimitive?.booleanOrNull ?: false
             val key = args["key"]?.jsonPrimitive?.contentOrNull
-            val timeoutMs = args["timeout_ms"]?.jsonPrimitive?.intOrNull
-                ?.toLong()?.coerceIn(500, 30_000)
+            val timeoutMs = args["timeout_ms"]?.jsonPrimitive?.longOrNull
+                ?.takeIf { it > 0L }
+                ?: runtimeSettings.browserActionTimeoutMs
                 ?: 5000L
 
             val request = BrowserUseRequest(

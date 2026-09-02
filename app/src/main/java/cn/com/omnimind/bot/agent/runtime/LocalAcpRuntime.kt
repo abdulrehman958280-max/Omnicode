@@ -10,7 +10,6 @@ import cn.com.omnimind.bot.agent.readAgentAttachmentBytes
 import cn.com.omnimind.bot.agent.AgentWorkspaceManager
 import cn.com.omnimind.bot.agent.AgentWorkspaceAttachmentSupport
 import cn.com.omnimind.bot.agent.AgentScheduleToolBridge
-import cn.com.omnimind.bot.agent.AgentTurnTimingPolicy
 import cn.com.omnimind.baselib.database.DatabaseHelper
 import cn.com.omnimind.baselib.llm.ChatCompletionMessage
 import cn.com.omnimind.bot.mcp.McpServerManager
@@ -114,7 +113,6 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
-import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.coroutineContext
 
 /**
@@ -179,7 +177,7 @@ internal class AcpPromptExecution(
             cancellationRequested && !promptStarted
         }
         if (cancelBeforeStart) {
-            job.cancel(CancellationException("ACP prompt cancelled before admission"))
+            job.cancel()
         }
     }
 
@@ -195,14 +193,16 @@ internal class AcpPromptExecution(
      * true when the official prompt has already been admitted and therefore
      * must be cancelled through ClientSession.cancel instead.
      */
-    fun requestCancellation(cause: CancellationException): Boolean {
+    fun requestCancellation(): Boolean {
         val started = synchronized(lock) {
             cancellationRequested = true
             promptStarted
         }
         if (!started) {
-            preparationJob?.cancel(cause)
-            synchronized(lock) { promptJob }?.cancel(cause)
+            // User cancellation is a normal ACP lifecycle outcome. Do not
+            // inject a custom exception into the protocol coroutine.
+            preparationJob?.cancel()
+            synchronized(lock) { promptJob }?.cancel()
         }
         return started
     }
@@ -464,26 +464,15 @@ internal fun shouldProjectAcpTurnUpdate(
  */
 private class AcpTurnTiming {
     private val startedAtNanos = System.nanoTime()
-    @Volatile
-    private var lastActivityAtNanos = startedAtNanos
     private val stages = linkedMapOf<String, Long>()
 
     @Synchronized
     fun mark(stage: String): Long? {
-        lastActivityAtNanos = System.nanoTime()
         if (stages.containsKey(stage)) return null
         val elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAtNanos)
         stages[stage] = elapsed
         return elapsed
     }
-
-    fun touch() {
-        lastActivityAtNanos = System.nanoTime()
-    }
-
-    fun idleMillis(): Long = TimeUnit.NANOSECONDS.toMillis(
-        System.nanoTime() - lastActivityAtNanos
-    )
 }
 
 internal fun shouldPrepareManagedAgentWithoutSwitchingRuntime(
@@ -501,8 +490,7 @@ internal class LocalAcpRuntime(
     private val scope: CoroutineScope,
     private val bindingRepository: AgentSessionBindingRepository,
     private val profileStore: AcpAgentProfileStore,
-    private val prepareLaunchEnvironment:
-        suspend (AcpAgentProfile, String?) -> Map<String, String>,
+    private val prepareLaunchEnvironment: suspend (AcpAgentProfile) -> Map<String, String>,
     private val resolveSessionMcpEnabled: suspend (AcpAgentProfile) -> Boolean = { true },
     private val prepareSharedProviderBinding: suspend () -> Unit = {},
     private val buildHandoffContext: suspend (Long, String?) -> String?,
@@ -643,8 +631,7 @@ internal class LocalAcpRuntime(
     fun agentVersion(): String? = agentInfo?.implementation?.version
 
     suspend fun connect(
-        profile: AcpAgentProfile = profileStore.selected(),
-        reasoningEffort: String? = null,
+        profile: AcpAgentProfile = profileStore.selected()
     ) {
         val callerJob = coroutineContext[Job]
         callerJob?.let(pendingConnectJobs::add)
@@ -663,7 +650,7 @@ internal class LocalAcpRuntime(
                 sessionMcpEnabled = true
                 emptyMap()
             } else {
-                prepareLaunchEnvironment(profile, reasoningEffort).also {
+                prepareLaunchEnvironment(profile).also {
                     val officialRuntime = AcpAgentProfileStore.officialRuntime(profile)
                     val health = profileStore.health(profile.id)
                     if (shouldProbeManagedAcpLaunchCommand(
@@ -721,7 +708,10 @@ internal class LocalAcpRuntime(
                 },
             )
         } else {
-            val launchEnvironment = baseEnvironment + profile.environment
+            val launchEnvironment = mergeAcpLaunchEnvironment(
+                profileEnvironment = profile.environment,
+                providerEnvironment = baseEnvironment,
+            )
             activeLaunchEnvironment = launchEnvironment
             AcpProcessConnection(
                 context = appContext,
@@ -1772,7 +1762,7 @@ internal class LocalAcpRuntime(
             // command in place; the normal agent/select path performs the ACP
             // handshake when the user actually switches to that Harness.
             return runCatching {
-                prepareLaunchEnvironment(profile, null)
+                prepareLaunchEnvironment(profile)
                 requireLaunchCommand(profile)
                 val health = managedAgentPreparationHealth(
                     preparationRevision = AcpAgentProfileStore
@@ -2700,7 +2690,6 @@ internal class LocalAcpRuntime(
             throw error
         }
         val completion = CompletableDeferred<Map<String, Any?>>()
-        val timedOut = AtomicBoolean(false)
         // Keep the execution job alive while it waits on this gate. That makes
         // the resource visible to session/cancel before any prompt IO starts,
         // while still giving the admission check below one atomic boundary.
@@ -2756,16 +2745,12 @@ internal class LocalAcpRuntime(
                 failure = error
             } finally {
                 promptExecutions.remove(threadId, execution)
-                val status = if (timedOut.get()) {
-                    "timeout"
-                } else {
-                    resolveTurnTerminalStatus(
-                        stopReason = stopReason,
-                        promptResponseReceived = promptResponseReceived,
-                        cancelled = cancelled,
-                        error = failure,
-                    )
-                }
+                val status = resolveTurnTerminalStatus(
+                    stopReason = stopReason,
+                    promptResponseReceived = promptResponseReceived,
+                    cancelled = cancelled,
+                    error = failure,
+                )
                 finishTurn(
                     threadId = threadId,
                     turnId = turnId,
@@ -2784,25 +2769,6 @@ internal class LocalAcpRuntime(
         }
         execution.attachPromptJob(job)
         promptStart.complete(Unit)
-        // A few ACP adapters stream updates but never deliver the terminal
-        // prompt response. Keep the UI and turn reservation recoverable by
-        // timing out only after a period with no ACP activity. This is an
-        // inactivity watchdog, so long-running turns that keep streaming are
-        // not interrupted merely because they exceed a wall-clock duration.
-        val watchdog = scope.launch {
-            while (isActive && turnOwnership.activeTurnId(threadId) == turnId) {
-                delay(STALL_CHECK_INTERVAL_MS)
-                val timing = turnTimings[turnIdentity] ?: break
-                if (timing.idleMillis() < STALL_DEADLINE_MS) continue
-                if (!timedOut.compareAndSet(false, true)) break
-                val message = "ACP turn stalled for ${STALL_DEADLINE_MS / 1000}s without updates"
-                Log.e(TAG, "$message session=$threadId turn=$turnId")
-                finishTurn(threadId, turnId, status = "timeout", error = message)
-                job.cancel(CancellationException(message))
-                break
-            }
-        }
-        job.invokeOnCompletion { watchdog.cancel() }
         // A process exit is not guaranteed to close an in-flight ACP prompt
         // flow.  StdioTransport may remain suspended on the input channel even
         // after the child has gone away, so observing the connection only while
@@ -2862,14 +2828,15 @@ internal class LocalAcpRuntime(
     }
 
     /**
-     * The single exit through which a turn is ever declared over.
+     * The single host cleanup boundary for an ACP prompt.
      *
-     * ACP guarantees a `session/prompt` response carrying a stop reason, but
-     * the response is a MethodChannel result and is not visible to the
-     * EventChannel reducer. Emit the terminal lifecycle notification before
-     * releasing the active-turn reservation so both transports observe the
-     * same boundary. The reducer treats duplicate completion from the prompt
-     * response as idempotent.
+     * ACP owns the terminal result: `ClientSession.prompt` returns a
+     * PromptResponse, or the request/cancellation owner returns an error. The
+     * UI receives that result through `session/prompt` and projects it through
+     * the shared reducer. This method only releases Android execution
+     * resources and host bookkeeping; it must not invent a second private
+     * turn lifecycle notification.
+     * lifecycle notification.
      */
     private suspend fun finishTurn(
         threadId: String,
@@ -2878,36 +2845,6 @@ internal class LocalAcpRuntime(
         error: String? = null
     ) {
         if (turnOwnership.finish(threadId, turnId, status, error) == null) return
-        val terminalMethod = if (status == "error" || status == "timeout") {
-            "turn/failed"
-        } else {
-            "turn/completed"
-        }
-        val terminalParams = linkedMapOf<String, Any?>(
-            "sessionId" to threadId,
-            "turnId" to turnId,
-            "status" to status,
-            "stopReason" to status,
-        )
-        error?.takeIf { it.isNotBlank() }?.let { terminalParams["error"] = it }
-        runCatching {
-            emitHostMessage(
-                linkedMapOf(
-                    "method" to terminalMethod,
-                    "params" to terminalParams,
-                    "sessionId" to threadId,
-                    "threadId" to threadId,
-                    "turnId" to turnId,
-                )
-            )
-        }.onFailure { emissionError ->
-            Log.w(
-                TAG,
-                "Unable to emit terminal lifecycle event for turn=$turnId: " +
-                    emissionError.message,
-                emissionError,
-            )
-        }
         markTurnTiming(threadId, turnId, "terminal_$status")
         val turnIdentity = AcpTurnIdentity(threadId, turnId)
         turnTimings.remove(turnIdentity)
@@ -2982,54 +2919,28 @@ internal class LocalAcpRuntime(
         // prevents the later prompt call, so session/cancel is never sent as
         // a misleading substitute for a prompt that did not exist.
         val execution = promptExecutions[threadId]
-        val promptStarted = execution?.requestCancellation(
-            CancellationException("ACP session cancellation requested")
-        ) == true
-        val protocolCancelled = if (promptStarted) {
+        val promptStarted = execution?.requestCancellation() == true
+        if (promptStarted) {
             withTimeoutOrNull(CANCEL_REQUEST_TIMEOUT_MS) {
                 try {
                     session.cancel()
                     true
                 } catch (error: CancellationException) {
-                    throw error
+                    // session/cancel is a protocol lifecycle request. A
+                    // prompt may finish by cancelling its coroutine, but that
+                    // normal terminal condition must not escape the JSON-RPC
+                    // dispatcher and abort the host process.
+                    Log.d(
+                        TAG,
+                        "ACP session cancellation observed for session=$threadId",
+                        error,
+                    )
+                    false
                 } catch (error: Throwable) {
                     Log.w(TAG, "ACP session cancellation request failed", error)
                     false
                 }
-            } == true
-        } else {
-            true
-        }
-
-        val promptJob = execution?.promptJob()
-        val collectorStopped = if (promptJob != null) {
-            withTimeoutOrNull(CANCEL_JOIN_TIMEOUT_MS) {
-                // Let the official ClientSession prompt flow observe its own
-                // PromptResponse(CANCELLED). Cancelling this collector here
-                // would discard that protocol terminal event.
-                promptJob.join()
-                true
-            } == true
-        } else {
-            true
-        }
-
-        // If the adapter ignored cancellation and the collector did not
-        // terminate, close the ACP process as a last-resort kill switch. The
-        // next prompt will reconnect through ensureLocalAcpConnected(). This
-        // is preferable to leaving a Harness executing tools after the user
-        // explicitly pressed stop.
-        if (turnId != null && !collectorStopped) {
-            Log.w(
-                TAG,
-                "ACP cancellation did not settle for session=$threadId " +
-                    "protocolCancelled=$protocolCancelled " +
-                    "collectorStopped=$collectorStopped; closing process"
-            )
-            runCatching { disconnect() }
-                .onFailure { error ->
-                    Log.w(TAG, "Unable to close ACP process after cancellation", error)
-                }
+            }
         }
 
         return mapOf(
@@ -3146,8 +3057,6 @@ internal class LocalAcpRuntime(
         pendingExtensionRequests[requestId] = pending
         serverRequestOwners.register(requestId, activeAgentId(), sessionId)
         try {
-            sessionId?.let { id ->
-            }
             val activeTurnId = sessionId?.let(turnOwnership::activeTurnId)
             emitHostMessage(
                 linkedMapOf(
@@ -3163,8 +3072,6 @@ internal class LocalAcpRuntime(
         } finally {
             pendingExtensionRequests.remove(requestId, pending)
             serverRequestOwners.remove(requestId, activeAgentId(), sessionId)
-            sessionId?.let { id ->
-            }
         }
     }
 
@@ -3922,7 +3829,6 @@ internal class LocalAcpRuntime(
                 return
             }
             val turnIdentity = AcpTurnIdentity(threadId, resolvedId)
-            turnTimings[turnIdentity]?.touch()
             markTurnTiming(threadId, resolvedId, "first_update")
             when (update) {
                 is SessionUpdate.AgentThoughtChunk ->
@@ -4169,8 +4075,6 @@ internal class LocalAcpRuntime(
         private const val CONNECT_CANCEL_TIMEOUT_MS = 2_000L
         private const val CANCEL_REQUEST_TIMEOUT_MS = 2_000L
         private const val CANCEL_JOIN_TIMEOUT_MS = 2_000L
-        private const val STALL_CHECK_INTERVAL_MS = 5_000L
-        private const val STALL_DEADLINE_MS = AgentTurnTimingPolicy.ACP_TURN_IDLE_TIMEOUT_MS
         private const val COMMAND_PROBE_TIMEOUT_MS = 20_000L
         private const val MAX_FILE_LINES = 20_000
         private const val MAX_ACP_TERMINAL_BUFFER_CHARS = 256_000

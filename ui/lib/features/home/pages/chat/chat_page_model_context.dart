@@ -365,7 +365,7 @@ mixin _ChatPageModelContextMixin on _ChatPageStateBase {
     }
     showToast(
       LegacyTextLocalizer.localize(
-        normalizedEffort == 'no' ? '已关闭思考' : '已设置思考强度为 $normalizedEffort',
+        normalizedEffort == 'none' ? '已关闭思考' : '已设置思考强度为 $normalizedEffort',
       ),
       type: ToastType.success,
     );

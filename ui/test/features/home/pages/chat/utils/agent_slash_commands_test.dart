@@ -41,19 +41,13 @@ void main() {
     );
   });
 
-  test('routes agent reasoning effort commands', () {
-    expect(
-      resolveAgentSlashSubmitIntent('/effort').kind,
-      AgentSlashSubmitKind.openReasoningEffortPicker,
-    );
-    final effortIntent = resolveAgentSlashSubmitIntent('/effort high');
-    expect(effortIntent.kind, AgentSlashSubmitKind.selectReasoningEffort);
-    expect(effortIntent.value, 'high');
-  });
-
-  test('rejects unsupported agent-only slash commands', () {
+  test('rejects agent-only slash commands in codex mode', () {
     expect(
       resolveAgentSlashSubmitIntent('/compact').kind,
+      AgentSlashSubmitKind.unsupported,
+    );
+    expect(
+      resolveAgentSlashSubmitIntent('/effort high').kind,
       AgentSlashSubmitKind.unsupported,
     );
     expect(

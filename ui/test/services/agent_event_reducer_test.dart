@@ -272,31 +272,6 @@ void main() {
     expect(runtime.messages.single.user, 2);
   });
 
-  test('remote disconnect finalizes an active ACP turn', () {
-    runtime
-      ..isAiResponding = true
-      ..currentDispatchTurnId = 'remote-turn-1'
-      ..activeRunId = 'remote-turn-1';
-
-    final result = reducer.reduce(
-      runtime: runtime,
-      event: {
-        'eventId': 'remote-disconnect:1',
-        'method': 'codex/disconnected',
-        'params': {'exitCode': 7},
-      },
-    );
-
-    expect(result.handled, isTrue);
-    expect(runtime.isAiResponding, isFalse);
-    expect(
-      runtime.messages.any(
-        (message) => message.cardData?['title'] == 'turn/failed',
-      ),
-      isTrue,
-    );
-  });
-
   test('ACP assistant chunks preserve Markdown whitespace byte for byte', () {
     const chunks = <String>[
       '程序运行成功了！',
@@ -2246,10 +2221,10 @@ void main() {
     expect(message.isError, isTrue);
     expect(message.content?['agentErrorText'], '网络连接中断');
     expect(message.content?['agentRetryable'], isTrue);
-    expect(message.content?['agentContinueable'], isFalse);
+    expect(message.content?['agentContinueable'], isNull);
   });
 
-  test('keeps partial ACP output non-error when recovery is continuable', () {
+  test('does not project partial ACP recovery as a continuation action', () {
     reducer.reduce(
       runtime: runtime,
       event: {
@@ -2280,8 +2255,8 @@ void main() {
     final message = runtime.messages.single;
     expect(message.text, '半截答案');
     expect(message.isError, isFalse);
-    expect(message.content?['agentContinueable'], isTrue);
-    expect(message.content?['agentContinueResumeMode'], 'approximate');
+    expect(message.content?['agentContinueable'], isNull);
+    expect(message.content?['agentContinueResumeMode'], isNull);
   });
 
   test(

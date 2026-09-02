@@ -4,6 +4,7 @@ import cn.com.omnimind.baselib.llm.ProviderModelOption
 import cn.com.omnimind.baselib.llm.OpenAiWireApi
 import com.google.gson.JsonParser
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -12,6 +13,24 @@ class AgentConfigAdaptersTest {
         baseUrl = "https://llmapi.paratera.com/v1",
         apiKey = "secret",
     )
+
+    @Test
+    fun runtimeSettingsCanBeSavedWithoutChangingHarnessConfig() {
+        assertTrue(
+            isRuntimeSettingsOnlyAgentConfigUpdate(
+                mapOf("agentId" to "codex", "runtimeSettings" to emptyMap<String, Any?>())
+            )
+        )
+        assertFalse(
+            isRuntimeSettingsOnlyAgentConfigUpdate(
+                mapOf(
+                    "agentId" to "codex",
+                    "runtimeSettings" to emptyMap<String, Any?>(),
+                    "model" to "next-model",
+                )
+            )
+        )
+    }
 
     @Test
     fun sharedAgentModelRequiresAnExplicitProviderBinding() {
@@ -93,14 +112,18 @@ class AgentConfigAdaptersTest {
         val claude = AgentConfigAdapterRegistry.map(
             AgentProviderMappingInput(
                 agentId = CLAUDE_CODE_AGENT_ID,
-                provider = provider,
+                provider = AgentProviderCredentials(
+                    baseUrl = "https://llmapi.paratera.com/anthropic",
+                    apiKey = provider.apiKey,
+                    protocolType = "anthropic",
+                ),
                 model = model,
                 harnessAdapter = AcpHarnessAdapters.claudeCode,
             ),
         )
         assertEquals(provider.apiKey, claude.environment["ANTHROPIC_API_KEY"])
         assertEquals(provider.apiKey, claude.environment["ANTHROPIC_AUTH_TOKEN"])
-        assertEquals(provider.baseUrl, claude.environment["ANTHROPIC_BASE_URL"])
+        assertEquals("https://llmapi.paratera.com/anthropic", claude.environment["ANTHROPIC_BASE_URL"])
         assertEquals(model, claude.environment["ANTHROPIC_MODEL"])
         assertEquals(model, claude.environment["ANTHROPIC_SMALL_FAST_MODEL"])
 
@@ -116,149 +139,6 @@ class AgentConfigAdaptersTest {
         assertEquals(provider.baseUrl, openCode.environment["OPENAI_BASE_URL"])
         assertEquals("omnibot/GLM-5.1", openCode.openCodeModel)
         assertEquals("https://llmapi.paratera.com/v1", openCode.openCodeBaseUrl)
-    }
-
-    @Test
-    fun kimiCodeUsesTheSharedProviderThroughItsEphemeralModelChannel() {
-        val mapping = AgentConfigAdapterRegistry.map(
-            AgentProviderMappingInput(
-                agentId = AcpAgentProfileStore.KIMI_CODE_AGENT_ID,
-                provider = provider.copy(
-                    customHeaders = mapOf(" X-Trace " to " request-1 "),
-                ),
-                model = "GLM-5.1",
-                harnessAdapter = AcpHarnessAdapters.kimiCode,
-            ),
-        )
-
-        assertEquals("GLM-5.1", mapping.environment["KIMI_MODEL_NAME"])
-        assertEquals("secret", mapping.environment["KIMI_MODEL_API_KEY"])
-        assertEquals("https://llmapi.paratera.com/v1", mapping.environment["KIMI_MODEL_BASE_URL"])
-        assertEquals("openai", mapping.environment["KIMI_MODEL_PROVIDER_TYPE"])
-        assertEquals("/root/.kimi-code/omnibot", mapping.environment["KIMI_CODE_HOME"])
-        assertEquals("image_in,thinking", mapping.environment["KIMI_MODEL_CAPABILITIES"])
-        assertEquals("X-Trace: request-1", mapping.environment["KIMI_CODE_CUSTOM_HEADERS"])
-        assertEquals("1", mapping.environment["KIMI_CODE_NO_AUTO_UPDATE"])
-        assertEquals(null, mapping.launchConfigPath)
-    }
-
-    @Test
-    fun kimiCodePublishesExplicitEffortForCustomOpenAiProvidersThroughConfig() {
-        val input = AgentProviderMappingInput(
-            agentId = AcpAgentProfileStore.KIMI_CODE_AGENT_ID,
-            provider = provider,
-            model = "GLM-5.1",
-            reasoningEffort = "high",
-            harnessAdapter = AcpHarnessAdapters.kimiCode,
-        )
-        val mapping = AgentConfigAdapterRegistry.map(input)
-        assertEquals(KIMI_CODE_CONFIG_PATH, mapping.launchConfigPath)
-        val writes = AgentConfigAdapterRegistry.launchConfigWrites(
-            input = input,
-            mapping = mapping,
-            providerModels = emptyList(),
-            existingConfig = "[permissions]\nmode = \"manual\"\n",
-        )
-
-        assertEquals(1, writes.size)
-        assertEquals(KIMI_CODE_CONFIG_PATH, writes.single().path)
-        assertTrue(writes.single().content.contains("[permissions]"))
-        assertTrue(writes.single().content.contains("enabled = true"))
-        assertTrue(writes.single().content.contains("effort = \"high\""))
-        // Kimi's forced-effort environment override is not valid for the
-        // generic OpenAI provider and must not be emitted accidentally.
-        assertTrue(!mapping.environment.containsKey("KIMI_MODEL_THINKING_EFFORT"))
-    }
-
-    @Test
-    fun kimiCodeUsesForcedEffortOnlyForTheNativeKimiProvider() {
-        val environment = buildKimiCodeModelEnvironment(
-            provider = AgentProviderCredentials(
-                baseUrl = "https://api.moonshot.cn/v1",
-                apiKey = "secret",
-            ),
-            model = "kimi-k2.6",
-            reasoningEffort = "xhigh",
-        )
-
-        assertEquals("xhigh", environment["KIMI_MODEL_THINKING_EFFORT"])
-    }
-
-    @Test
-    fun kimiCodeThinkingConfigCanTurnThinkingOffWithoutDroppingOtherSettings() {
-        val config = buildKimiCodeThinkingConfigToml(
-            existingConfig = """
-                [thinking]
-                enabled = true
-                effort = "high"
-                keep = "all"
-
-                [permissions]
-                mode = "manual"
-            """.trimIndent(),
-            reasoningEffort = "none",
-        )
-
-        assertTrue(config.contains("enabled = false"))
-        assertTrue(!config.contains("effort = \"high\""))
-        assertTrue(config.contains("keep = \"all\""))
-        assertTrue(config.contains("[permissions]"))
-    }
-
-    @Test
-    fun kimiCodeThinkingConfigStopsBeforeArrayTables() {
-        val config = buildKimiCodeThinkingConfigToml(
-            existingConfig = """
-                [thinking]
-                enabled = true
-
-                [[hooks]]
-                event = "PreToolUse"
-            """.trimIndent(),
-            reasoningEffort = "medium",
-        )
-
-        assertTrue(config.indexOf("effort = \"medium\"") < config.indexOf("[[hooks]]"))
-        assertTrue(config.contains("event = \"PreToolUse\""))
-    }
-
-    @Test
-    fun kimiCodeRecognizesMoonshotAndAnthropicProviderTypes() {
-        val kimi = buildKimiCodeModelEnvironment(
-            provider = AgentProviderCredentials(
-                baseUrl = "https://api.moonshot.cn",
-                apiKey = "secret",
-            ),
-            model = "kimi-k2.6",
-        )
-        assertEquals("kimi", kimi["KIMI_MODEL_PROVIDER_TYPE"])
-        assertEquals("https://api.moonshot.cn/v1", kimi["KIMI_MODEL_BASE_URL"])
-
-        val anthropic = buildKimiCodeModelEnvironment(
-            provider = AgentProviderCredentials(
-                baseUrl = "https://provider.example/v1",
-                apiKey = "secret",
-                protocolType = "anthropic",
-            ),
-            model = "claude-sonnet",
-        )
-        assertEquals("anthropic", anthropic["KIMI_MODEL_PROVIDER_TYPE"])
-        assertEquals("https://provider.example/v1", anthropic["KIMI_MODEL_BASE_URL"])
-    }
-
-    @Test
-    fun deepSeekWebEnvironmentDoesNotReuseTheHeadlessAcpHome() {
-        val environment = buildDeepSeekHarnessWebEnvironment(
-            provider = provider,
-            model = "GLM-5.1",
-        )
-
-        assertEquals("https://llmapi.paratera.com/v1", environment["DEEPSEEK_BASE_URL"])
-        assertEquals("secret", environment["DEEPSEEK_API_KEY"])
-        assertEquals("GLM-5.1", environment["DSH_MODEL"])
-        assertEquals("/root/.dsh/omnibot-web", environment["DSH_HOME"])
-        assertEquals("/root/.dsh/omnibot-web/sessions", environment["DSH_SESSION_ROOT"])
-        assertTrue(!environment.containsKey("DSH_ACP_HOME"))
     }
 
     @Test
@@ -310,6 +190,133 @@ class AgentConfigAdaptersTest {
         }.exceptionOrNull()
 
         assertTrue(failure is IllegalArgumentException)
+    }
+
+    @Test
+    fun editableProviderHeadersReachEachOfficialAdapterSurface() {
+        val configuredProvider = AgentProviderCredentials(
+            baseUrl = "https://example.com/v1",
+            apiKey = "secret",
+            customHeaders = linkedMapOf(
+                " X-Trace-Id " to " trace-1 ",
+                "X-Region" to "cn",
+                "Host" to "must-be-dropped",
+            ),
+        )
+
+        val codex = AgentConfigAdapterRegistry.map(
+            AgentProviderMappingInput(
+                agentId = AcpAgentProfileStore.CODEX_AGENT_ID,
+                provider = configuredProvider,
+                model = "model-a",
+                harnessAdapter = AcpHarnessAdapters.codex,
+            ),
+        )
+        assertEquals(
+            mapOf(
+                "X-Trace-Id" to "OMNIBOT_PROVIDER_HEADER_0",
+                "X-Region" to "OMNIBOT_PROVIDER_HEADER_1",
+            ),
+            codex.codexEnvHttpHeaders,
+        )
+        assertEquals("trace-1", codex.environment["OMNIBOT_PROVIDER_HEADER_0"])
+        assertEquals("cn", codex.environment["OMNIBOT_PROVIDER_HEADER_1"])
+        val codexConfig = AgentConfigAdapterRegistry.launchConfigWrites(
+            input = AgentProviderMappingInput(
+                agentId = AcpAgentProfileStore.CODEX_AGENT_ID,
+                provider = configuredProvider,
+                model = "model-a",
+                harnessAdapter = AcpHarnessAdapters.codex,
+            ),
+            mapping = codex,
+            providerModels = listOf(ProviderModelOption(id = "model-a")),
+            existingConfig = "",
+        ).first().content
+        assertTrue(codexConfig.contains("\"X-Trace-Id\" = \"OMNIBOT_PROVIDER_HEADER_0\""))
+
+        val claude = AgentConfigAdapterRegistry.map(
+            AgentProviderMappingInput(
+                agentId = CLAUDE_CODE_AGENT_ID,
+                provider = configuredProvider.copy(
+                    baseUrl = "https://example.com/anthropic",
+                    protocolType = "anthropic",
+                ),
+                model = "model-a",
+                harnessAdapter = AcpHarnessAdapters.claudeCode,
+            ),
+        )
+        assertEquals(
+            "X-Trace-Id: trace-1\nX-Region: cn",
+            claude.environment["ANTHROPIC_CUSTOM_HEADERS"],
+        )
+
+        val openCode = AgentConfigAdapterRegistry.map(
+            AgentProviderMappingInput(
+                agentId = OPENCODE_AGENT_ID,
+                provider = configuredProvider,
+                model = "model-a",
+                harnessAdapter = AcpHarnessAdapters.openCode,
+            ),
+        )
+        val openCodeConfig = AgentConfigAdapterRegistry.launchConfigWrites(
+            input = AgentProviderMappingInput(
+                agentId = OPENCODE_AGENT_ID,
+                provider = configuredProvider,
+                model = "model-a",
+                harnessAdapter = AcpHarnessAdapters.openCode,
+            ),
+            mapping = openCode,
+            providerModels = listOf(ProviderModelOption(id = "model-a")),
+            existingConfig = "",
+        ).single().content
+        val openCodeHeaders = JsonParser.parseString(openCodeConfig)
+            .asJsonObject["provider"].asJsonObject["omnibot"]
+            .asJsonObject["options"].asJsonObject["headers"].asJsonObject
+        assertEquals(
+            "{env:OMNIBOT_PROVIDER_HEADER_0}",
+            openCodeHeaders["X-Trace-Id"].asString,
+        )
+        assertEquals(
+            "{env:OMNIBOT_PROVIDER_HEADER_1}",
+            openCodeHeaders["X-Region"].asString,
+        )
+        assertTrue("Host" !in openCodeHeaders.entrySet().map { it.key })
+    }
+
+    @Test
+    fun editableProviderChangesRecomputeMappingWithoutStaleValues() {
+        val first = AgentConfigAdapterRegistry.map(
+            AgentProviderMappingInput(
+                agentId = OPENCODE_AGENT_ID,
+                provider = AgentProviderCredentials(
+                    baseUrl = "https://old.example.com/v1",
+                    apiKey = "old-key",
+                    customHeaders = mapOf("X-Old" to "old"),
+                ),
+                model = "old-model",
+                harnessAdapter = AcpHarnessAdapters.openCode,
+            ),
+        )
+        val second = AgentConfigAdapterRegistry.map(
+            AgentProviderMappingInput(
+                agentId = OPENCODE_AGENT_ID,
+                provider = AgentProviderCredentials(
+                    baseUrl = "https://new.example.com/v1",
+                    apiKey = "new-key",
+                    customHeaders = mapOf("X-New" to "new"),
+                ),
+                model = "new-model",
+                harnessAdapter = AcpHarnessAdapters.openCode,
+            ),
+        )
+
+        assertEquals("https://old.example.com/v1", first.openCodeBaseUrl)
+        assertEquals("old-model", first.openCodeModel?.substringAfter('/'))
+        assertEquals("https://new.example.com/v1", second.openCodeBaseUrl)
+        assertEquals("new-model", second.openCodeModel?.substringAfter('/'))
+        assertEquals("new-key", second.environment["OPENAI_API_KEY"])
+        assertTrue("OMNIBOT_PROVIDER_HEADER_0" in second.environment)
+        assertEquals("new", second.environment["OMNIBOT_PROVIDER_HEADER_0"])
     }
 
     @Test
@@ -598,6 +605,44 @@ class AgentConfigAdaptersTest {
         assertTrue(config.contains("@ai-sdk/openai-compatible"))
         assertTrue(config.contains("omnibot/GLM-5.1"))
         assertTrue(config.contains("{env:OPENAI_API_KEY}"))
+        assertFalse(config.contains("\"context\""))
+        assertFalse(config.contains("\"output\""))
+    }
+
+    @Test
+    fun openCodeEditableHeadersReplaceOnlyPreviousAdapterValues() {
+        val existing = """
+            {
+              "provider": {
+                "omnibot": {
+                  "options": {
+                    "headers": {
+                      "X-Old": "{env:OMNIBOT_PROVIDER_HEADER_0}",
+                      "X-Keep": "keep-me"
+                    }
+                  }
+                }
+              }
+            }
+        """.trimIndent()
+
+        val config = JsonParser.parseString(
+            buildOpenCodeConfigJson(
+                model = "omnibot/model-a",
+                baseUrl = "https://example.com/v1",
+                existingConfigJson = existing,
+                customHeaders = mapOf("X-New" to "new-value"),
+            ),
+        ).asJsonObject
+        val headers = config["provider"].asJsonObject["omnibot"]
+            .asJsonObject["options"].asJsonObject["headers"].asJsonObject
+
+        assertTrue("X-Old" !in headers.entrySet().map { it.key })
+        assertEquals("keep-me", headers["X-Keep"].asString)
+        assertEquals(
+            "{env:OMNIBOT_PROVIDER_HEADER_0}",
+            headers["X-New"].asString,
+        )
     }
 
     @Test
@@ -627,10 +672,129 @@ class AgentConfigAdaptersTest {
     }
 
     @Test
+    fun claudeCodeUsesDeepSeekOfficialAnthropicEndpoint() {
+        assertEquals(
+            "https://api.deepseek.com/anthropic",
+            normalizeClaudeCodeBaseUrl("https://api.deepseek.com/v1"),
+        )
+        val mapping = AgentConfigAdapterRegistry.map(
+            AgentProviderMappingInput(
+                agentId = CLAUDE_CODE_AGENT_ID,
+                provider = AgentProviderCredentials(
+                    baseUrl = "https://api.deepseek.com/v1",
+                    apiKey = "deepseek-key",
+                ),
+                model = "deepseek-v4-flash",
+                harnessAdapter = AcpHarnessAdapters.claudeCode,
+            ),
+        )
+        assertEquals(
+            "https://api.deepseek.com/anthropic",
+            mapping.environment["ANTHROPIC_BASE_URL"],
+        )
+    }
+
+    @Test
     fun claudeCodeLeavesUnknownProviderEndpointUntouched() {
         assertEquals(
             "https://llmapi.paratera.com/v1",
             normalizeClaudeCodeBaseUrl("https://llmapi.paratera.com/v1")
         )
+    }
+
+    @Test
+    fun claudeCodeRejectsOpenAiOnlyEndpointBeforeLaunch() {
+        val failure = runCatching {
+            AgentConfigAdapterRegistry.map(
+                AgentProviderMappingInput(
+                    agentId = CLAUDE_CODE_AGENT_ID,
+                    provider = provider,
+                    model = "GLM-5.1",
+                    harnessAdapter = AcpHarnessAdapters.claudeCode,
+                )
+            )
+        }.exceptionOrNull()
+
+        assertTrue(failure is IllegalArgumentException)
+        assertTrue(failure?.message.orEmpty().contains("Anthropic-compatible"))
+    }
+
+    @Test
+    fun providerMappingCannotBeShadowedByStaleProfileEnvironment() {
+        val merged = mergeAcpLaunchEnvironment(
+            profileEnvironment = mapOf(
+                "ANTHROPIC_BASE_URL" to "https://old.example.com/anthropic",
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" to "1",
+            ),
+            providerEnvironment = mapOf(
+                "ANTHROPIC_BASE_URL" to "https://api.minimaxi.com/anthropic",
+                "ANTHROPIC_MODEL" to "MiniMax-M3",
+            ),
+        )
+
+        assertEquals("https://api.minimaxi.com/anthropic", merged["ANTHROPIC_BASE_URL"])
+        assertEquals("MiniMax-M3", merged["ANTHROPIC_MODEL"])
+        assertEquals("1", merged["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"])
+    }
+
+    @Test
+    fun staleProviderEnvironmentIsRemovedWhenCurrentProviderIsAbsent() {
+        val merged = mergeAcpLaunchEnvironment(
+            profileEnvironment = mapOf(
+                "ANTHROPIC_BASE_URL" to "https://old.example.com/anthropic",
+                "ANTHROPIC_API_KEY" to "old-key",
+                "OPENAI_BASE_URL" to "https://old.example.com/v1",
+                "OMNIBOT_PROVIDER_HEADER_0" to "old-header",
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" to "1",
+            ),
+            providerEnvironment = emptyMap(),
+        )
+
+        assertTrue("ANTHROPIC_BASE_URL" !in merged)
+        assertTrue("ANTHROPIC_API_KEY" !in merged)
+        assertTrue("OPENAI_BASE_URL" !in merged)
+        assertTrue("OMNIBOT_PROVIDER_HEADER_0" !in merged)
+        assertEquals("1", merged["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"])
+    }
+
+    @Test
+    fun claudeCodeMapsMiniMaxOpenAiBaseToAnthropicBase() {
+        assertEquals(
+            "https://api.minimaxi.com/anthropic",
+            normalizeClaudeCodeBaseUrl("https://api.minimaxi.com/v1")
+        )
+        assertEquals(
+            "https://api.minimax.io/anthropic",
+            normalizeClaudeCodeBaseUrl("https://api.minimax.io/v1/chat/completions")
+        )
+    }
+
+    @Test
+    fun claudeCodePreservesMiniMaxAnthropicBase() {
+        assertEquals(
+            "https://api.minimaxi.com/anthropic",
+            normalizeClaudeCodeBaseUrl("https://api.minimaxi.com/anthropic/v1")
+        )
+    }
+
+    @Test
+    fun claudeCodeLaunchEnvironmentUsesMappedMiniMaxAnthropicEndpoint() {
+        val mapping = AgentConfigAdapterRegistry.map(
+            AgentProviderMappingInput(
+                agentId = "claude-code-acp",
+                provider = AgentProviderCredentials(
+                    baseUrl = "https://api.minimaxi.com/v1",
+                    apiKey = "test-key",
+                ),
+                model = "MiniMax-M3",
+                harnessAdapter = AcpHarnessAdapters.claudeCode,
+            )
+        )
+
+        assertEquals(
+            "https://api.minimaxi.com/anthropic",
+            mapping.environment["ANTHROPIC_BASE_URL"]
+        )
+        assertEquals("MiniMax-M3", mapping.environment["ANTHROPIC_MODEL"])
     }
 }

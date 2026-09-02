@@ -1,6 +1,5 @@
 package cn.com.omnimind.bot.agent.runtime
 
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import java.util.ArrayDeque
 import org.junit.Assert.assertFalse
@@ -194,11 +193,7 @@ class LocalAcpRuntimeTest {
         val execution = AcpPromptExecution(preparation)
         execution.attachPromptJob(prompt)
 
-        assertFalse(
-            execution.requestCancellation(
-                CancellationException("user stopped preparation")
-            )
-        )
+        assertFalse(execution.requestCancellation())
         assertFalse(execution.tryStartPrompt())
         assertTrue(preparation.isCancelled)
         assertTrue(prompt.isCancelled)
@@ -211,11 +206,7 @@ class LocalAcpRuntimeTest {
         execution.attachPromptJob(prompt)
         assertTrue(execution.tryStartPrompt())
 
-        assertTrue(
-            execution.requestCancellation(
-                CancellationException("user stopped prompt")
-            )
-        )
+        assertTrue(execution.requestCancellation())
         assertFalse(prompt.isCancelled)
         prompt.cancel()
     }
@@ -415,13 +406,6 @@ class LocalAcpRuntimeTest {
             ownership.reserve("session-a", "new-turn", "request-a")
                 is AcpTurnReservation.Completed
         )
-    }
-
-    @Test
-    fun `remote cancellation projects a completed cancelled turn`() {
-        assertEquals("turn/completed", remoteTerminalMethod("cancelled"))
-        assertEquals("turn/failed", remoteTerminalMethod("timeout"))
-        assertEquals("turn/failed", remoteTerminalMethod("error"))
     }
 
     @Test

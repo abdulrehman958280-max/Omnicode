@@ -51,7 +51,7 @@ class PrivilegedToolHandler(
     data class PrivilegedSessionExecArgs(
         val sessionId: String,
         val command: String,
-        val timeoutSeconds: Int,
+        val timeoutSeconds: Int?,
         val confirmed: Boolean
     )
 
@@ -76,7 +76,12 @@ class PrivilegedToolHandler(
             "android_privileged_action" -> executeAndroidPrivilegedAction(args, callback, env, toolHandle.toolCallId)
             "android_privileged_session_start" -> executeAndroidPrivilegedSessionStart(args, env.workspaceDescriptor, callback, env, toolHandle.toolCallId)
             "android_privileged_session_exec" -> executeAndroidPrivilegedSessionExec(args, env.workspaceDescriptor, callback, toolHandle, env)
-            "android_privileged_session_read" -> executeAndroidPrivilegedSessionRead(args, env.workspaceDescriptor, callback)
+            "android_privileged_session_read" -> executeAndroidPrivilegedSessionRead(
+                args,
+                env.workspaceDescriptor,
+                env.runtimeSettings,
+                callback,
+            )
             "android_privileged_session_stop" -> executeAndroidPrivilegedSessionStop(args, env.workspaceDescriptor, callback)
             else -> ToolExecutionResult.Error(toolCall.function.name, "Unknown privileged tool")
         }
@@ -117,7 +122,7 @@ class PrivilegedToolHandler(
     ): ToolExecutionResult {
         val toolName = "android_privileged_action"
         return try {
-            val parsed = parseAndroidPrivilegedArgs(args)
+            val parsed = parseAndroidPrivilegedArgs(args, env.runtimeSettings)
             val shizukuManager = ShizukuCapabilityManager.get(helper.context)
             val status = shizukuManager.getStatus()
             if (!status.isGranted()) {
@@ -139,10 +144,8 @@ class PrivilegedToolHandler(
                     return ToolExecutionResult.Error(toolName, helper.localized(reason))
                 }
                 val confirmation = requestPrivilegedConfirmation(
-                    callback = callback,
                     action = parsed.action,
                     command = parsed.command,
-                    field = "arguments.confirmed",
                     env = env,
                     toolCallId = toolCallId,
                     toolName = toolName,
@@ -206,9 +209,7 @@ class PrivilegedToolHandler(
             if (!status.isGranted()) { return helper.permissionRequiredResult(callback, listOf("Shizuku 权限")) }
             if (!parsed.confirmed) {
                 val confirmation = requestPrivilegedConfirmation(
-                    callback = callback,
                     action = SharedHelper.PRIVILEGED_SESSION_START_ACTION,
-                    field = "confirmed",
                     env = env,
                     toolCallId = toolCallId,
                     toolName = toolName,
@@ -255,7 +256,7 @@ class PrivilegedToolHandler(
     ): ToolExecutionResult {
         val toolName = "android_privileged_session_exec"
         return try {
-            var parsed = parsePrivilegedSessionExecArgs(args)
+            var parsed = parsePrivilegedSessionExecArgs(args, env.runtimeSettings)
             require(isOwnedPrivilegedSession(workspace.id, parsed.sessionId)) { "高权限会话不存在或不属于当前 workspace：${parsed.sessionId}" }
             val shizukuManager = ShizukuCapabilityManager.get(helper.context)
             val status = shizukuManager.getStatus()
@@ -265,10 +266,8 @@ class PrivilegedToolHandler(
                     return ToolExecutionResult.Error(toolName, helper.localized(reason))
                 }
                 val confirmation = requestPrivilegedConfirmation(
-                    callback = callback,
                     action = SharedHelper.PRIVILEGED_SESSION_EXEC_ACTION,
                     command = parsed.command,
-                    field = "confirmed",
                     env = env,
                     toolCallId = toolHandle.toolCallId,
                     toolName = toolName,
@@ -303,10 +302,15 @@ class PrivilegedToolHandler(
         catch (e: Exception) { helper.errorResult(toolName, e.message, "高权限会话命令执行失败") }
     }
 
-    private suspend fun executeAndroidPrivilegedSessionRead(args: JsonObject, workspace: AgentWorkspaceDescriptor, callback: AgentCallback): ToolExecutionResult {
+    private suspend fun executeAndroidPrivilegedSessionRead(
+        args: JsonObject,
+        workspace: AgentWorkspaceDescriptor,
+        runtimeSettings: AgentRuntimeSettings,
+        callback: AgentCallback,
+    ): ToolExecutionResult {
         val toolName = "android_privileged_session_read"
         return try {
-            val parsed = parsePrivilegedSessionReadArgs(args)
+            val parsed = parsePrivilegedSessionReadArgs(args, runtimeSettings)
             require(isOwnedPrivilegedSession(workspace.id, parsed.sessionId)) { "高权限会话不存在或不属于当前 workspace：${parsed.sessionId}" }
             val shizukuManager = ShizukuCapabilityManager.get(helper.context)
             val status = shizukuManager.getStatus()
@@ -350,7 +354,10 @@ class PrivilegedToolHandler(
         catch (e: Exception) { helper.errorResult(toolName, e.message, "结束高权限会话失败") }
     }
 
-    private fun parseAndroidPrivilegedArgs(args: JsonObject): AndroidPrivilegedArgs {
+    private fun parseAndroidPrivilegedArgs(
+        args: JsonObject,
+        runtimeSettings: AgentRuntimeSettings,
+    ): AndroidPrivilegedArgs {
         val action = args["action"]?.jsonPrimitive?.contentOrNull?.trim()?.lowercase().orEmpty()
         require(action.isNotEmpty()) { "action 不能为空" }
         val rawArguments = args["arguments"] as? JsonObject ?: JsonObject(emptyMap())
@@ -358,7 +365,9 @@ class PrivilegedToolHandler(
             action = action,
             arguments = helper.jsonObjectToStringMap(rawArguments, excludedKeys = setOf("environment")),
             command = rawArguments["command"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() },
-            timeoutSeconds = rawArguments["timeoutSeconds"]?.jsonPrimitive?.intOrNull?.coerceIn(5, 600),
+            timeoutSeconds = rawArguments["timeoutSeconds"]?.jsonPrimitive?.intOrNull
+                ?.takeIf { it > 0 }
+                ?: runtimeSettings.terminalTimeoutSeconds,
             workingDirectory = rawArguments["workingDirectory"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() },
             environment = helper.parseEnvironmentMap(rawArguments["environment"] as? JsonObject)
         )
@@ -373,22 +382,36 @@ class PrivilegedToolHandler(
         )
     }
 
-    private fun parsePrivilegedSessionExecArgs(args: JsonObject): PrivilegedSessionExecArgs {
+    private fun parsePrivilegedSessionExecArgs(
+        args: JsonObject,
+        runtimeSettings: AgentRuntimeSettings,
+    ): PrivilegedSessionExecArgs {
         val sessionId = args["sessionId"]?.jsonPrimitive?.content?.trim().orEmpty()
         val command = args["command"]?.jsonPrimitive?.content?.trim().orEmpty()
         require(sessionId.isNotEmpty()) { "缺少 sessionId" }
         require(command.isNotEmpty()) { "缺少 command" }
         return PrivilegedSessionExecArgs(
             sessionId = sessionId, command = command,
-            timeoutSeconds = args["timeoutSeconds"]?.jsonPrimitive?.intOrNull?.coerceIn(5, 600) ?: 120,
+            timeoutSeconds = args["timeoutSeconds"]?.jsonPrimitive?.intOrNull
+                ?.takeIf { it > 0 }
+                ?: runtimeSettings.terminalTimeoutSeconds,
             confirmed = helper.parseConfirmedFlag(args["confirmed"])
         )
     }
 
-    private fun parsePrivilegedSessionReadArgs(args: JsonObject): PrivilegedSessionReadArgs {
+    private fun parsePrivilegedSessionReadArgs(
+        args: JsonObject,
+        runtimeSettings: AgentRuntimeSettings,
+    ): PrivilegedSessionReadArgs {
         val sessionId = args["sessionId"]?.jsonPrimitive?.content?.trim().orEmpty()
         require(sessionId.isNotEmpty()) { "缺少 sessionId" }
-        return PrivilegedSessionReadArgs(sessionId = sessionId, maxChars = args["maxChars"]?.jsonPrimitive?.intOrNull?.coerceIn(256, 64_000) ?: SharedHelper.DEFAULT_TERMINAL_SESSION_READ_MAX_CHARS)
+        return PrivilegedSessionReadArgs(
+            sessionId = sessionId,
+            maxChars = args["maxChars"]?.jsonPrimitive?.intOrNull
+                ?.takeIf { it > 0 }
+                ?: runtimeSettings.terminalSessionReadMaxChars
+                ?: Int.MAX_VALUE,
+        )
     }
 
     private fun parsePrivilegedSessionStopArgs(args: JsonObject): PrivilegedSessionStopArgs {
@@ -414,10 +437,8 @@ class PrivilegedToolHandler(
     }
 
     private suspend fun requestPrivilegedConfirmation(
-        callback: AgentCallback,
         action: String,
         command: String? = null,
-        field: String,
         env: AgentExecutionEnvironment,
         toolCallId: String,
         toolName: String,
@@ -439,8 +460,10 @@ class PrivilegedToolHandler(
                 )
             }
         }
-        callback.onClarifyRequired(question, listOf(field))
-        return ToolExecutionResult.Clarify(question, listOf(field))
+        return ToolExecutionResult.Error(
+            toolName,
+            helper.localized("高权限操作需要授权，但当前未提供授权通道，操作已停止。"),
+        )
     }
 
     private fun privilegedPermissionTitle(action: String): String {

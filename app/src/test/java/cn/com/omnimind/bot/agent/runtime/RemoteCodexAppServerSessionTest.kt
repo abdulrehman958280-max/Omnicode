@@ -5,6 +5,7 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class RemoteCodexAppServerSessionTest {
@@ -49,6 +50,18 @@ class RemoteCodexAppServerSessionTest {
                 it.contains("\"method\":\"\$/cancel_request\"") &&
                     it.contains("\"requestId\":2")
             },
+        )
+    }
+
+    @Test
+    fun `prompt response status is the remote terminal boundary`() {
+        assertEquals(
+            "completed",
+            terminalStatusFromAcpParams(mapOf("stopReason" to "end_turn")),
+        )
+        assertEquals(
+            "cancelled",
+            terminalStatusFromAcpParams(mapOf("stopReason" to "cancelled")),
         )
     }
 
