@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:ui/core/router/go_router_manager.dart';
 import 'package:ui/services/agent_runtime_service.dart';
+import 'package:ui/services/omni_plugin_service.dart';
 import 'package:ui/services/scene_model_config_service.dart';
 import 'package:ui/services/storage_service.dart';
 import 'package:ui/theme/theme_context.dart';
@@ -31,6 +32,8 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
   bool _refreshing = false;
   String? _error;
   String? _busyAgentId;
+  String? _busyPluginActionKey;
+  List<OmniPluginActionItem> _pluginActions = const <OmniPluginActionItem>[];
   int _catalogRequestId = 0;
   late Set<String> _preparingAgentIds;
   StreamSubscription<Set<String>>? _preparationSubscription;
@@ -59,6 +62,7 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
     // immediate; users can request the full terminal/proot probe with the
     // refresh action without blocking this page.
     unawaited(_load());
+    unawaited(_loadPluginActions());
     unawaited(_loadSharedModel());
     unawaited(_loadRemoteBridge());
   }
@@ -103,6 +107,23 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
       });
     } catch (_) {
       // The Agent catalog remains usable when scene binding is unavailable.
+    }
+  }
+
+  Future<void> _loadPluginActions() async {
+    try {
+      final actions = await OmniPluginService.listActions();
+      if (!mounted) return;
+      setState(() {
+        _pluginActions = actions
+            .where(
+              (action) => action.presentation['placement'] == 'agent_settings',
+            )
+            .toList(growable: false);
+      });
+    } catch (_) {
+      // Agent configuration remains available if the optional action catalog
+      // cannot be read during app startup.
     }
   }
 
@@ -365,6 +386,117 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
     }
   }
 
+  String _pluginActionKey(OmniPluginActionItem action) =>
+      '${action.pluginId}/${action.id}';
+
+  String _localizedPluginValue(Object? value, String fallback) {
+    if (value is Map) {
+      final language = _english ? 'en' : 'zh';
+      final localized = value[language]?.toString().trim() ?? '';
+      if (localized.isNotEmpty) return localized;
+      final english = value['en']?.toString().trim() ?? '';
+      if (english.isNotEmpty) return english;
+      final chinese = value['zh']?.toString().trim() ?? '';
+      if (chinese.isNotEmpty) return chinese;
+    }
+    final text = value?.toString().trim() ?? '';
+    return text.isEmpty ? fallback : text;
+  }
+
+  Future<void> _invokePluginAction(OmniPluginActionItem action) async {
+    final key = _pluginActionKey(action);
+    if (_busyPluginActionKey != null) return;
+    setState(() => _busyPluginActionKey = key);
+    try {
+      final response = await OmniPluginService.invokeAction(
+        action.pluginId,
+        action.id,
+      );
+      if (!mounted) return;
+      final code = response['code']?.toString().trim() ?? '';
+      final label = _localizedPluginValue(
+        action.presentation['label'],
+        action.displayName,
+      );
+      switch (code) {
+        case 'OPENED':
+          showToast(_text('$label 已打开', '$label opened'));
+          return;
+        case 'RUNTIME_MISSING':
+          final packageId =
+              response['packageId']?.toString().trim().isNotEmpty == true
+              ? response['packageId'].toString().trim()
+              : action.presentation['packageId']?.toString().trim() ?? '';
+          GoRouterManager.push(
+            '/home/termux_setting?focus=${Uri.encodeComponent(packageId)}',
+          );
+          return;
+        case 'PROVIDER_REQUIRED':
+          showToast(
+            _text(
+              '请先配置统一 Dispatch Provider',
+              'Configure the shared Dispatch Provider first',
+            ),
+            type: ToastType.warning,
+          );
+          GoRouterManager.push('/home/model_provider_setting');
+          return;
+        case 'MODEL_REQUIRED':
+          showToast(
+            _text('请先为 Dispatch 选择模型', 'Select a model for Dispatch first'),
+            type: ToastType.warning,
+          );
+          GoRouterManager.push('/home/model_provider_setting');
+          return;
+        case 'UNSUPPORTED_PROVIDER':
+          showToast(
+            _text(
+              '$label 暂不支持当前 Provider 协议',
+              '$label does not support the current Provider protocol',
+            ),
+            type: ToastType.warning,
+          );
+          return;
+        case 'URL_TIMEOUT':
+          showToast(
+            _text('$label 启动超时，后台进程已停止', '$label timed out and was stopped'),
+            type: ToastType.error,
+          );
+          return;
+        case 'STOP_FAILED':
+          showToast(
+            _text(
+              '$label 的旧进程无法停止，请在终端设置中处理后重试',
+              'The previous $label process could not be stopped; check Terminal settings and retry',
+            ),
+            type: ToastType.error,
+          );
+          return;
+        case 'BROWSER_UNAVAILABLE':
+          showToast(
+            _text('没有可用的系统浏览器', 'No system browser is available'),
+            type: ToastType.error,
+          );
+          return;
+        default:
+          showToast(
+            _text('$label 启动失败', 'Failed to start $label'),
+            type: ToastType.error,
+          );
+      }
+    } catch (error) {
+      if (!mounted) return;
+      showToast(
+        _text('启动 Web 界面失败：$error', 'Failed to open Web UI: $error'),
+        type: ToastType.error,
+      );
+    } finally {
+      if (mounted && _busyPluginActionKey == key) {
+        setState(() => _busyPluginActionKey = null);
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final palette = context.omniPalette;
@@ -508,6 +640,16 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
                         ),
                       ],
                     ),
+                  ],
+                  if (_pluginActions.isNotEmpty) ...[
+                    const SizedBox(height: 24),
+                    _buildSectionLabel(
+                      _text('本地 Web 界面', 'Local Web interfaces'),
+                    ),
+                    for (var i = 0; i < _pluginActions.length; i++) ...[
+                      _buildPluginActionTile(_pluginActions[i]),
+                      if (i < _pluginActions.length - 1) _buildRowDivider(),
+                    ],
                   ],
                   // 远程 PC Bridge：全局共享配置入口（仅配置远程 ACP 连接）。
                   const SizedBox(height: 24),
@@ -709,6 +851,32 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
     );
   }
 
+  Widget _buildPluginActionTile(OmniPluginActionItem action) {
+    final palette = context.omniPalette;
+    final key = _pluginActionKey(action);
+    final busy = _busyPluginActionKey == key;
+    final disabled = _busyPluginActionKey != null;
+    final label = _localizedPluginValue(
+      action.presentation['label'],
+      action.displayName,
+    );
+    final description = _localizedPluginValue(
+      action.presentation['description'],
+      action.description,
+    );
+    return _FlatTile(
+      tileKey: Key('plugin-action-$key'),
+      leading: Icon(LucideIcons.globe2, size: 18, color: palette.accentPrimary),
+      title: label,
+      subtitle: description,
+      actionLabel: _text('打开', 'Open'),
+      actionKey: Key('plugin-action-button-$key'),
+      onAction: disabled ? null : () => _invokePluginAction(action),
+      busy: busy,
+      onTap: disabled ? null : () => _invokePluginAction(action),
+    );
+  }
+
   /// Surface the common plugin workflow without exposing a raw capability
   /// dump. The source remains the generic ACP profile capabilities map; this
   /// page does not branch the runtime by vendor.
@@ -872,7 +1040,7 @@ class _FlatTile extends StatelessWidget {
 
   final Widget leading;
   final String title;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
   final Key? tileKey;
   final Color? statusColor;
   final String? statusLabel;
@@ -1067,7 +1235,7 @@ class _FlatTile extends StatelessWidget {
                           ),
                         ),
                       )
-                    else
+                    else if (!busy && actionLabel == null)
                       Icon(
                         LucideIcons.chevronRight,
                         size: 18,

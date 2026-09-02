@@ -140,6 +140,8 @@ private val DEEPSEEK_HARNESS_DECLARED_CAPABILITIES: Map<String, Any?> = mapOf(
 
 internal const val DEEPSEEK_HARNESS_NPM_CHANNEL = "next"
 internal const val DEEPSEEK_HARNESS_PNPM_VERSION = "11.22.0"
+internal const val DEEPSEEK_HARNESS_NODE_ENTRYPOINT =
+    "/root/.npm-global/lib/node_modules/@deepseek-ai/dsh/lib/bin.js"
 internal const val DEEPSEEK_HARNESS_PREPARATION_REVISION =
     "deepseek-dsh-pnpm-copy-v11"
 private const val DEEPSEEK_HARNESS_NPM_PRIMARY_REGISTRY =
@@ -310,7 +312,7 @@ internal val DEEPSEEK_HARNESS_NPM_INSTALL_COMMAND = """
       '  disabled: true' \
       > "$DEEPSEEK_HARNESS_ACP_PATCH_PATH"
     printf '%s\n' '#!/bin/sh' \
-      'exec node --expose-internals /root/.npm-global/lib/node_modules/@deepseek-ai/dsh/lib/bin.js --patch "$DEEPSEEK_HARNESS_ACP_PATCH_PATH" "${'$'}@"' \
+      'exec node --expose-internals $DEEPSEEK_HARNESS_NODE_ENTRYPOINT --patch "$DEEPSEEK_HARNESS_ACP_PATCH_PATH" "${'$'}@"' \
       > /root/.npm-global/bin/dsh-acp-android
     chmod 755 /root/.npm-global/bin/dsh-acp-android
     test -x /root/.npm-global/bin/dsh-acp-android
