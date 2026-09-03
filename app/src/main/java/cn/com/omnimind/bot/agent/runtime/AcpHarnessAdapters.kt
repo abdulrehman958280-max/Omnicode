@@ -35,6 +35,7 @@ internal enum class AcpHarnessProviderConfigKind {
     STANDARD,
     CODEX,
     CLAUDE_CODE,
+    KIMI_CODE,
     OPEN_CODE,
     DEEPSEEK_HARNESS,
 }
@@ -112,6 +113,11 @@ internal object AcpHarnessAdapters {
     val claudeCode: AcpHarnessAdapter = object : AcpHarnessAdapter {
         override val mcpTransport = AcpHarnessMcpTransport.SESSION_DECLARATION
         override val providerConfigKind = AcpHarnessProviderConfigKind.CLAUDE_CODE
+    }
+
+    val kimiCode: AcpHarnessAdapter = object : AcpHarnessAdapter {
+        override val mcpTransport = AcpHarnessMcpTransport.SESSION_DECLARATION
+        override val providerConfigKind = AcpHarnessProviderConfigKind.KIMI_CODE
     }
 
     val openCode: AcpHarnessAdapter = object : AcpHarnessAdapter {

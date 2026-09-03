@@ -486,7 +486,7 @@ class AgentRuntimeProtocolPayloadTest {
     @Test
     fun managedAcpCatalogIncludesSupportedAgentsWithoutGemini() {
         assertEquals(
-            listOf("小万", "Codex", "Claude Code", "OpenCode", "DeepSeek Harness"),
+            listOf("小万", "Kimi Code", "Claude Code", "Codex", "OpenCode", "DeepSeek Harness"),
             AcpAgentProfileStore.OFFICIAL_AGENTS.map { it.name }
         )
         assertTrue(AcpAgentProfileStore.OFFICIAL_AGENTS.all { it.builtIn })
@@ -521,6 +521,19 @@ class AgentRuntimeProtocolPayloadTest {
             AcpAgentProfileStore.officialRuntime(xiaowan)?.discoveryCommand
         )
         assertNull(AcpAgentProfileStore.officialRuntime(xiaowan)?.managedAdapterPackage)
+        val kimi = AcpAgentProfileStore.OFFICIAL_AGENTS.first {
+            it.id == AcpAgentProfileStore.KIMI_CODE_AGENT_ID
+        }
+        assertEquals("kimi", kimi.command)
+        assertEquals(listOf("acp"), kimi.arguments)
+        val kimiRuntime = AcpAgentProfileStore.officialRuntime(kimi)
+        assertEquals("kimi", kimiRuntime?.discoveryCommand)
+        assertEquals(KIMI_CODE_NPM_PACKAGE_SPEC, kimiRuntime?.managedAdapterPackage)
+        assertEquals("kimi", kimiRuntime?.terminalPackageId)
+        assertEquals(
+            AcpHarnessProviderConfigKind.KIMI_CODE,
+            kimiRuntime?.harnessAdapter?.providerConfigKind,
+        )
         val deepSeek = AcpAgentProfileStore.OFFICIAL_AGENTS.first {
             it.id == AcpAgentProfileStore.DEEPSEEK_HARNESS_AGENT_ID
         }
@@ -553,9 +566,21 @@ class AgentRuntimeProtocolPayloadTest {
         assertTrue(MANAGED_NATIVE_BUILD_PREREQUISITES_COMMAND.contains("apk fix --no-cache"))
         assertTrue(MANAGED_NATIVE_BUILD_PREREQUISITES_COMMAND.contains("apk fix --no-cache --upgrade"))
         assertTrue(MANAGED_NATIVE_BUILD_PREREQUISITES_COMMAND.contains("build-essential python3"))
-        assertTrue(DEEPSEEK_HARNESS_NPM_INSTALL_COMMAND.contains("dsh plugin --profile acp add"))
+        assertTrue(DEEPSEEK_HARNESS_NPM_INSTALL_COMMAND.contains("dsh plugin --profile acp add -w"))
         assertTrue(DEEPSEEK_HARNESS_NPM_INSTALL_COMMAND.contains("profiles/acp/package.json"))
         assertTrue(DEEPSEEK_HARNESS_NPM_INSTALL_COMMAND.contains("pnpm@$DEEPSEEK_HARNESS_PNPM_VERSION"))
+        assertTrue(DEEPSEEK_HARNESS_NPM_INSTALL_COMMAND.contains("PNPM_CONFIG_PACKAGE_IMPORT_METHOD=copy"))
+        assertTrue(DEEPSEEK_HARNESS_NPM_INSTALL_COMMAND.contains("PROFILE_LAYOUT_MARKER"))
+        assertTrue(
+            DEEPSEEK_HARNESS_NPM_INSTALL_COMMAND.contains(
+                "timeout 30 dsh-acp-android --profile acp --dump-config"
+            )
+        )
+        assertTrue(
+            DEEPSEEK_HARNESS_NPM_INSTALL_COMMAND.contains(
+                "pnpm config set --location=project packageImportMethod copy"
+            )
+        )
         assertTrue(
             DEEPSEEK_HARNESS_NPM_INSTALL_COMMAND.contains("DSH_HOME=\"/root/.dsh/omnibot-acp\"")
         )
@@ -810,6 +835,14 @@ class AgentRuntimeProtocolPayloadTest {
 
     @Test
     fun managedAgentInstallationUsesTheExistingOfficialTerminalSetupIds() {
+        assertEquals(
+            "kimi",
+            managedAgentTerminalPackageId(
+                AcpAgentProfileStore.OFFICIAL_AGENTS.first {
+                    it.id == AcpAgentProfileStore.KIMI_CODE_AGENT_ID
+                }
+            )
+        )
         assertEquals(
             "deepseek_harness",
             managedAgentTerminalPackageId(

@@ -6,7 +6,6 @@ import android.os.Looper
 import android.util.Log
 import com.ai.assistance.operit.terminal.TerminalManager
 import com.ai.assistance.operit.terminal.setup.buildAlpinePackageInstallCommand
-import cn.com.omnimind.baselib.account.OmniAccount
 import cn.com.omnimind.baselib.database.DatabaseHelper
 import cn.com.omnimind.baselib.llm.ModelProviderProfile
 import cn.com.omnimind.baselib.llm.ModelProviderConfigStore
@@ -2327,52 +2326,13 @@ class AgentRuntimeManager private constructor(
         ensureSharedAgentProviderBinding()
     }
 
-    private fun currentAgentProviderProfile(): ModelProviderProfile? = runCatching {
-        val binding = SceneModelBindingStore.getBinding("scene.dispatch.model")
-        val editingProfile = ModelProviderConfigStore.getEditingProfile()
-        val configuredProfile = binding
-            ?.providerProfileId
-            ?.let(ModelProviderConfigStore::getProfile)
-        resolveDispatchAgentProviderProfile(
-            boundProviderProfileId = binding?.providerProfileId,
-            configuredProfile = configuredProfile,
-            editingProfile = editingProfile,
-            officialProfile = PlatformAiProvisioner.officialProfileOrNull(),
-        )
-    }.getOrNull()
+    private fun currentAgentProviderProfile(): ModelProviderProfile? =
+        AgentDispatchConfiguration.providerProfile()
 
     private fun currentAgentProviderCredentials(): AgentProviderCredentials? =
-        currentAgentProviderProfile()
-            ?.let { profile ->
-                val apiKey = resolveAgentProviderApiKey(
-                    profile = profile,
-                    officialBearerToken = OmniAccount.currentAiRequestAccess().bearerToken,
-                ) ?: return@let null
-                AgentProviderCredentials(
-                    baseUrl = profile.baseUrl,
-                    apiKey = apiKey,
-                    wireApi = profile.wireApi,
-                    customHeaders = profile.customHeaders,
-                    protocolType = profile.protocolType,
-                    supportsNamespaceTools = OmniOfficialProvider.isOfficialProfile(profile.id),
-                ).normalized()
-            }
+        AgentDispatchConfiguration.providerCredentials()
 
-    private fun currentAgentBoundModel(): String? = runCatching {
-        val binding = SceneModelBindingStore.getBinding("scene.dispatch.model")
-        val boundProfile = binding?.let {
-            resolveAgentProviderProfile(
-                boundProviderProfileId = it.providerProfileId,
-                configuredProfile = ModelProviderConfigStore.getProfile(it.providerProfileId),
-                officialProfile = PlatformAiProvisioner.officialProfileOrNull(),
-            )
-        }?.takeIf { it.baseUrl.isNotBlank() }
-            ?: return@runCatching null
-        resolveSharedAgentModel(
-            boundProviderProfileId = binding.providerProfileId,
-            boundModel = binding.modelId
-        )
-    }.getOrNull()
+    private fun currentAgentBoundModel(): String? = AgentDispatchConfiguration.modelId()
 
     private data class ProviderModelResolution(
         val models: List<ProviderModelOption>,

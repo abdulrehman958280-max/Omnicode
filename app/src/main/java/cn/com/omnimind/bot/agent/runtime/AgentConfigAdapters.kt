@@ -116,6 +116,14 @@ private val PROVIDER_OWNED_ENVIRONMENT_KEYS = setOf(
     "DEEPSEEK_API_KEY",
     "DEEPSEEK_BASE_URL",
     "DSH_MODEL",
+    "KIMI_CODE_HOME",
+    "KIMI_MODEL_NAME",
+    "KIMI_MODEL_API_KEY",
+    "KIMI_MODEL_BASE_URL",
+    "KIMI_MODEL_PROVIDER_TYPE",
+    "KIMI_MODEL_CAPABILITIES",
+    "KIMI_MODEL_THINKING_EFFORT",
+    "KIMI_CODE_CUSTOM_HEADERS",
 )
 private const val PROVIDER_HEADER_ENV_PREFIX = "OMNIBOT_PROVIDER_HEADER_"
 
@@ -135,6 +143,7 @@ internal object AgentConfigAdapterRegistry {
         DeepSeekHarnessConfigAdapter,
         CodexConfigAdapter,
         ClaudeCodeConfigAdapter,
+        KimiCodeConfigAdapter,
         OpenCodeConfigAdapter
     )
 
@@ -170,6 +179,8 @@ internal object AgentConfigAdapterRegistry {
                 this === CodexConfigAdapter
             AcpHarnessProviderConfigKind.CLAUDE_CODE ->
                 this === ClaudeCodeConfigAdapter
+            AcpHarnessProviderConfigKind.KIMI_CODE ->
+                this === KimiCodeConfigAdapter
             AcpHarnessProviderConfigKind.OPEN_CODE ->
                 this === OpenCodeConfigAdapter
             AcpHarnessProviderConfigKind.STANDARD -> false
@@ -321,6 +332,20 @@ private object ClaudeCodeConfigAdapter : AgentConfigAdapter {
 private fun isAnthropicCompatibleBaseUrl(value: String): Boolean {
     return value.endsWith("/anthropic", ignoreCase = true) ||
         value.endsWith("/apps/anthropic", ignoreCase = true)
+}
+
+private object KimiCodeConfigAdapter : AgentConfigAdapter {
+    override fun map(input: AgentProviderMappingInput): AgentProviderMapping {
+        val provider = input.provider
+        val model = input.model
+        return AgentProviderMapping(
+            environment = if (provider != null && model != null) {
+                buildKimiCodeEnvironment(provider = provider, model = model)
+            } else {
+                kimiCodeBaseEnvironment()
+            },
+        )
+    }
 }
 
 private object OpenCodeConfigAdapter : AgentConfigAdapter {

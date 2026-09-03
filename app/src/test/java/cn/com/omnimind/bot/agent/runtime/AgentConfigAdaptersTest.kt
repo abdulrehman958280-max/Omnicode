@@ -110,6 +110,20 @@ class AgentConfigAdaptersTest {
         assertEquals("https://llmapi.paratera.com/v1", codex.codexBaseUrl)
         assertEquals(OpenAiWireApi.RESPONSES, codex.codexWireApi)
 
+        val kimi = AgentConfigAdapterRegistry.map(
+            AgentProviderMappingInput(
+                agentId = AcpAgentProfileStore.KIMI_CODE_AGENT_ID,
+                provider = provider,
+                model = model,
+                harnessAdapter = AcpHarnessAdapters.kimiCode,
+            ),
+        )
+        assertEquals(provider.apiKey, kimi.environment["KIMI_MODEL_API_KEY"])
+        assertEquals(provider.baseUrl, kimi.environment["KIMI_MODEL_BASE_URL"])
+        assertEquals(model, kimi.environment["KIMI_MODEL_NAME"])
+        assertEquals("openai", kimi.environment["KIMI_MODEL_PROVIDER_TYPE"])
+        assertEquals(KIMI_CODE_HOME, kimi.environment["KIMI_CODE_HOME"])
+
         val claude = AgentConfigAdapterRegistry.map(
             AgentProviderMappingInput(
                 agentId = CLAUDE_CODE_AGENT_ID,
@@ -249,6 +263,19 @@ class AgentConfigAdaptersTest {
         assertEquals(
             "X-Trace-Id: trace-1\nX-Region: cn",
             claude.environment["ANTHROPIC_CUSTOM_HEADERS"],
+        )
+
+        val kimi = AgentConfigAdapterRegistry.map(
+            AgentProviderMappingInput(
+                agentId = AcpAgentProfileStore.KIMI_CODE_AGENT_ID,
+                provider = configuredProvider,
+                model = "model-a",
+                harnessAdapter = AcpHarnessAdapters.kimiCode,
+            ),
+        )
+        assertEquals(
+            "X-Trace-Id: trace-1\nX-Region: cn",
+            kimi.environment["KIMI_CODE_CUSTOM_HEADERS"],
         )
 
         val openCode = AgentConfigAdapterRegistry.map(
