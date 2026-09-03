@@ -6,6 +6,7 @@ import cn.com.omnimind.baselib.i18n.AppLocaleManager
 import cn.com.omnimind.baselib.llm.ChatCompletionMessage
 import cn.com.omnimind.bot.agent.workspace.memory.LongTermMemoryIndex
 import cn.com.omnimind.bot.agent.workspace.memory.TurnMemoryLoadTracker
+import cn.com.omnimind.bot.agent.tool.AgentCapabilityModule
 import cn.com.omnimind.bot.agent.tool.AgentToolHandlerModule
 import cn.com.omnimind.bot.plugin.OmniPluginHost
 import cn.com.omnimind.bot.plugin.OmniPluginSession
@@ -28,7 +29,8 @@ import java.util.UUID
 class OmniAgentExecutor(
     private val context: Context,
     private val scope: CoroutineScope,
-    private val scheduleToolBridge: AgentScheduleToolBridge
+    private val scheduleToolBridge: AgentScheduleToolBridge,
+    private val sessionCapabilityModules: List<AgentCapabilityModule> = emptyList(),
 ) {
     internal data class TimeContextSnapshot(
         val locale: cn.com.omnimind.baselib.i18n.PromptLocale,
@@ -251,6 +253,9 @@ class OmniAgentExecutor(
                 conversationMode = conversationMode,
                 terminalDistribution = terminalDistribution,
                 pluginToolDefinitions = activePluginSession?.toolDefinitions.orEmpty(),
+                capabilityToolDefinitions = sessionCapabilityModules.flatMap {
+                    it.toolDefinitions
+                },
                 userMessage = userMessage,
                 toolRoutingMode = AgentToolRoutingMode.fromSkillFrontmatter(
                     resolvedSkills.map(ResolvedSkillContext::frontmatter),
@@ -329,10 +334,11 @@ class OmniAgentExecutor(
                 subagentDispatcher = subagentDispatcher,
                 toolCatalog = toolRegistry,
                 terminalDistribution = terminalDistribution,
-                capabilityModules = if (activePluginSession != null) {
-                    listOf(AgentToolHandlerModule(activePluginSession.toolHandlers))
-                } else {
-                    emptyList()
+                capabilityModules = buildList {
+                    addAll(sessionCapabilityModules)
+                    if (activePluginSession != null) {
+                        add(AgentToolHandlerModule(activePluginSession.toolHandlers))
+                    }
                 }
             )
             pluginSession = null

@@ -710,6 +710,29 @@ class AgentRuntimeManager private constructor(
         }
     }
 
+    /**
+     * ACP MCP declarations are immutable session setup inputs. Once the user
+     * edits the remote MCP set, no live local Agent may keep serving the old
+     * definitions or connections. The next request reconnects/resumes through
+     * the canonical ACP lifecycle with a fresh SessionCreationParameters list.
+     */
+    suspend fun invalidateMcpConfiguration() {
+        sessionMutex.withLock {
+            invalidateLocalProbeCache()
+            val connectedProfiles = acpAgentProfileStore.list().filter { profile ->
+                localRuntimeFor(profile.id).isConnected
+            }
+            connectedProfiles.forEach { profile ->
+                localRuntimeFor(profile.id).disconnect()
+                clearActiveTurnsForAgent(profile.id)
+            }
+            if (connectedProfiles.isNotEmpty() && activeRuntime == AgentRuntimeKind.LOCAL) {
+                activeRuntime = null
+                activeLocalDistributionId = null
+            }
+        }
+    }
+
     suspend fun handleMethod(method: String, args: Map<String, Any?>): Any? {
         val canonicalArgs = AcpSessionCompatibility.canonicalize(method, args)
         if (method == "initialize") {

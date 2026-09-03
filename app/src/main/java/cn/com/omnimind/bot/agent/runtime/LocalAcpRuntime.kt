@@ -3225,30 +3225,42 @@ internal class LocalAcpRuntime(
         args: Map<String, Any?> = emptyMap()
     ): SessionCreationParameters {
         val profile = activeProfile ?: profileStore.selected()
-        val supportsHttp = requireAgentInfo().capabilities.mcpCapabilities.http
+        val agentCapabilities = requireAgentInfo().capabilities
+        val supportsHttp = agentCapabilities.mcpCapabilities.http
+        val supportsSse = agentCapabilities.mcpCapabilities.sse
         val requestedAdditionalDirectories = (args["additionalDirectories"] as? List<*>)
             .orEmpty()
             .mapNotNull { it?.toString()?.trim()?.takeIf(String::isNotEmpty) }
             .distinct()
-        val supportsAdditionalDirectories = requireAgentInfo()
-            .capabilities.sessionCapabilities.additionalDirectories != null
+        val supportsAdditionalDirectories =
+            agentCapabilities.sessionCapabilities.additionalDirectories != null
         if (requestedAdditionalDirectories.isNotEmpty() && !supportsAdditionalDirectories) {
             throw IllegalArgumentException(
                 "${profile.name} ACP does not support additionalDirectories; " +
                     "use a path under ${AgentWorkspaceManager.SHELL_ROOT_PATH}."
             )
         }
-        val mcpState = if (sessionMcpEnabled && supportsHttp) {
+        // Xiaowan already owns the native OmniBot capability modules. Feeding
+        // the app's own loopback MCP server back into that built-in Agent would
+        // duplicate tools and create an unnecessary self-call path. External
+        // Harnesses still receive the local device MCP surface.
+        val shouldDeclareLocalServer = sessionMcpEnabled &&
+            supportsHttp &&
+            profile.id != AcpAgentProfileStore.XIAOWAN_AGENT_ID
+        val mcpState = if (shouldDeclareLocalServer) {
             McpServerManager.ensureRunning(appContext)
         } else {
             McpServerManager.currentState()
         }
-        val declaredServers = if (sessionMcpEnabled && supportsHttp) {
+        val declaredServers = if (sessionMcpEnabled) {
             buildLocalAgentAcpMcpServers(
                 harnessAdapter = AcpHarnessAdapters.forProfile(profile),
-                supportsHttp = supportsHttp,
+                supportsHttp = shouldDeclareLocalServer,
                 state = mcpState
-            ) + buildConfiguredRemoteAcpMcpServers()
+            ) + buildConfiguredRemoteAcpMcpServers(
+                supportsHttp = supportsHttp,
+                supportsSse = supportsSse,
+            )
         } else {
             emptyList()
         }
