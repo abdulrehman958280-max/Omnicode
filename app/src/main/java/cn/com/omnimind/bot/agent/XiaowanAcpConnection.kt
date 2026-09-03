@@ -36,10 +36,12 @@ import com.agentclientprotocol.common.Event
 import com.agentclientprotocol.common.SessionCreationParameters
 import com.agentclientprotocol.model.AgentCapabilities
 import com.agentclientprotocol.model.ContentBlock
+import com.agentclientprotocol.model.CloseSessionResponse
 import com.agentclientprotocol.model.DeleteSessionResponse
 import com.agentclientprotocol.model.EmbeddedResourceResource
 import com.agentclientprotocol.model.Implementation
 import com.agentclientprotocol.model.MessageId
+import com.agentclientprotocol.model.McpCapabilities
 import com.agentclientprotocol.model.ModelId
 import com.agentclientprotocol.model.ModelInfo
 import com.agentclientprotocol.model.PromptResponse
@@ -47,7 +49,6 @@ import com.agentclientprotocol.model.PromptCapabilities
 import com.agentclientprotocol.model.SessionCapabilities
 import com.agentclientprotocol.model.SessionCloseCapabilities
 import com.agentclientprotocol.model.SessionDeleteCapabilities
-import com.agentclientprotocol.model.SessionForkCapabilities
 import com.agentclientprotocol.model.SessionInfo
 import com.agentclientprotocol.model.SessionListCapabilities
 import com.agentclientprotocol.model.SessionResumeCapabilities
@@ -75,6 +76,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.launch
@@ -92,6 +94,8 @@ import java.util.UUID
 import java.time.Instant
 import java.nio.charset.StandardCharsets
 import java.util.Base64
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.coroutineContext
 
 /**
@@ -113,6 +117,7 @@ internal class XiaowanAcpConnection(
     private lateinit var serverTransport: LoopbackTransport
     private lateinit var serverProtocol: Protocol
     private lateinit var serverProtocolScope: CoroutineScope
+    private lateinit var agentSupport: XiaowanAgentSupport
 
     override val exitSignal = CompletableDeferred<Int?>()
     override val isRunning: Boolean
@@ -138,9 +143,7 @@ internal class XiaowanAcpConnection(
                 }
         )
         serverProtocol = Protocol(serverProtocolScope, serverTransport)
-        Agent(
-            serverProtocol,
-            XiaowanAgentSupport(
+        agentSupport = XiaowanAgentSupport(
                 context = context,
                 scope = scope,
                 scheduleToolBridge = scheduleToolBridge,
@@ -158,7 +161,7 @@ internal class XiaowanAcpConnection(
                     )
                 },
             )
-        )
+        Agent(serverProtocol, agentSupport)
         return clientTransport
     }
 
@@ -187,6 +190,7 @@ internal class XiaowanAcpConnection(
         "Built-in Xiaowan ACP Agent closed before initialize completed"
 
     override suspend fun close() {
+        if (::agentSupport.isInitialized) agentSupport.closeAllSessions()
         if (::serverProtocol.isInitialized) serverProtocol.close()
         if (::serverProtocolScope.isInitialized) serverProtocolScope.cancel()
         if (::clientTransport.isInitialized) clientTransport.close()
@@ -281,6 +285,7 @@ private class XiaowanAgentSupport(
 
     @Volatile
     private var cachedModels: XiaowanModels? = null
+    private val activeSessions = ConcurrentHashMap<String, XiaowanAgentSession>()
 
     override suspend fun initialize(clientInfo: ClientInfo): AgentInfo {
         // Provider/model resolution is owned by Dispatch Model. A persisted
@@ -298,29 +303,7 @@ private class XiaowanAgentSupport(
         }
         return AgentInfo(
                 protocolVersion = 1,
-                capabilities = AgentCapabilities(
-                    loadSession = true,
-                    promptCapabilities = PromptCapabilities(
-                    // The shared Chat Completions executor currently accepts
-                    // image parts and workspace file references, but it does
-                    // not send ACP audio blocks to an audio-capable model.
-                    // Advertising audio here made clients believe Xiaowan
-                    // could transcribe/play prompt audio, while the adapter
-                    // silently reduced it to a workspace attachment. Keep
-                    // the capability truthful until an audio input route is
-                    // implemented end-to-end.
-                    audio = false,
-                    image = true,
-                    embeddedContext = true,
-                ),
-                sessionCapabilities = SessionCapabilities(
-                    list = SessionListCapabilities(),
-                    fork = SessionForkCapabilities(),
-                    resume = SessionResumeCapabilities(),
-                    delete = SessionDeleteCapabilities(),
-                    close = SessionCloseCapabilities(),
-                )
-            ),
+                capabilities = xiaowanAgentCapabilities(),
             authMethods = emptyList(),
             implementation = Implementation(
                 name = "xiaowan",
@@ -335,11 +318,15 @@ private class XiaowanAgentSupport(
         sessionParameters: SessionCreationParameters,
     ): AgentSession {
         validateXiaowanSessionParameters(sessionParameters)
-        return createXiaowanSession(SessionId(UUID.randomUUID().toString()))
+        return createXiaowanSession(
+            sessionId = SessionId(UUID.randomUUID().toString()),
+            sessionParameters = sessionParameters,
+        )
     }
 
     private suspend fun createXiaowanSession(
         sessionId: SessionId,
+        sessionParameters: SessionCreationParameters,
         requirePersistedSession: Boolean = false,
     ): AgentSession {
         if (requirePersistedSession) {
@@ -349,7 +336,15 @@ private class XiaowanAgentSupport(
             }
         }
         val models = loadXiaowanModels()
-        return XiaowanAgentSession(
+        val mcpSession = XiaowanMcpSession.open(
+            context = context,
+            scope = scope,
+            sessionId = sessionId.value,
+            cwd = sessionParameters.cwd,
+            servers = sessionParameters.mcpServers,
+        )
+        lateinit var session: XiaowanAgentSession
+        session = XiaowanAgentSession(
             context = context,
             scope = scope,
             scheduleToolBridge = scheduleToolBridge,
@@ -359,7 +354,14 @@ private class XiaowanAgentSupport(
             providerProfile = models.providerProfile,
             sessionId = sessionId,
             requestPermission = requestPermission,
+            mcpSession = mcpSession,
+            onClosed = { closedSessionId ->
+                activeSessions.remove(closedSessionId, session)
+            },
         )
+        activeSessions.remove(sessionId.value)?.close(JsonNull)
+        activeSessions[sessionId.value] = session
+        return session
     }
 
     override suspend fun listSessions(
@@ -399,10 +401,12 @@ private class XiaowanAgentSupport(
         sessionId: SessionId,
         _meta: JsonElement?
     ): DeleteSessionResponse {
-        require(isXiaowanSession(sessionId.value)) {
-            "Xiaowan ACP session does not exist: ${sessionId.value}"
+        activeSessions.remove(sessionId.value)?.close(JsonNull)
+        if (isXiaowanSession(sessionId.value)) {
+            deleteSessionCallback(sessionId.value)
         }
-        deleteSessionCallback(sessionId.value)
+        // ACP deletion is intentionally idempotent: deleting an unknown or
+        // already-deleted session succeeds without fabricating history.
         return DeleteSessionResponse(JsonNull)
     }
 
@@ -411,7 +415,11 @@ private class XiaowanAgentSupport(
         sessionParameters: SessionCreationParameters
     ): AgentSession {
         validateXiaowanSessionParameters(sessionParameters)
-        return createXiaowanSession(sessionId, requirePersistedSession = true)
+        return createXiaowanSession(
+            sessionId = sessionId,
+            sessionParameters = sessionParameters,
+            requirePersistedSession = true,
+        )
     }
 
     override suspend fun resumeSession(
@@ -419,7 +427,11 @@ private class XiaowanAgentSupport(
         sessionParameters: SessionCreationParameters
     ): AgentSession {
         validateXiaowanSessionParameters(sessionParameters)
-        return createXiaowanSession(sessionId, requirePersistedSession = true)
+        return createXiaowanSession(
+            sessionId = sessionId,
+            sessionParameters = sessionParameters,
+            requirePersistedSession = true,
+        )
     }
 
     override suspend fun forkSession(
@@ -427,7 +439,18 @@ private class XiaowanAgentSupport(
         sessionParameters: SessionCreationParameters
     ): AgentSession {
         validateXiaowanSessionParameters(sessionParameters)
-        return createXiaowanSession(SessionId(UUID.randomUUID().toString()))
+        return createXiaowanSession(
+            sessionId = SessionId(UUID.randomUUID().toString()),
+            sessionParameters = sessionParameters,
+        )
+    }
+
+    suspend fun closeAllSessions() {
+        val sessions = activeSessions.values.toList()
+        activeSessions.clear()
+        sessions.forEach { session ->
+            runCatching { session.close(JsonNull) }
+        }
     }
 
     private fun validateXiaowanSessionParameters(parameters: SessionCreationParameters) {
@@ -624,6 +647,8 @@ private class XiaowanAgentSession(
     private val providerProfile: ModelProviderProfile,
     override val sessionId: SessionId,
     private val requestPermission: suspend (String, String, String, String) -> Boolean,
+    private val mcpSession: XiaowanMcpSession,
+    private val onClosed: (String) -> Unit,
 ) : AgentSession {
     private companion object {
         private const val TAG = "XiaowanAcpConnection"
@@ -633,6 +658,7 @@ private class XiaowanAgentSession(
     private val promptMutex = Mutex()
     @Volatile
     private var activePromptJob: Job? = null
+    private val closed = AtomicBoolean(false)
     private var selectedModelId: String = configuredModelId
     private val executor = OmniAgentExecutor(
         context = context,
@@ -663,12 +689,14 @@ private class XiaowanAgentSession(
                 )
             }
         },
+        sessionCapabilityModules = listOfNotNull(mcpSession.capabilityModule),
     )
 
     override suspend fun prompt(
         content: List<ContentBlock>,
         _meta: JsonElement?,
     ): Flow<Event> = channelFlow {
+        check(!closed.get()) { "Xiaowan ACP session is closed: ${sessionId.value}" }
         var promptJob: Job? = null
         try {
             promptMutex.withLock {
@@ -851,7 +879,16 @@ private class XiaowanAgentSession(
         // projects the official cancel result through the existing lifecycle.
         // Propagating a CancellationException from this callback can abort the
         // Android process while the JSON-RPC request is being handled.
-        activePromptJob?.cancel()
+        activePromptJob?.cancelAndJoin()
+    }
+
+    override suspend fun close(_meta: JsonElement?): CloseSessionResponse {
+        if (closed.compareAndSet(false, true)) {
+            cancel()
+            mcpSession.close()
+            onClosed(sessionId.value)
+        }
+        return CloseSessionResponse(JsonNull)
     }
 
     /**
@@ -919,6 +956,33 @@ internal fun AgentResult.Success.toAcpUsage(): Usage? {
         _meta = JsonNull,
     )
 }
+
+internal fun xiaowanAgentCapabilities(): AgentCapabilities = AgentCapabilities(
+    // ACP v1 session/load requires history replay before its response settles.
+    // Xiaowan restores durable context through resume but does not yet provide
+    // that replay boundary, so load must not be advertised.
+    loadSession = false,
+    promptCapabilities = PromptCapabilities(
+        // The shared executor accepts image and workspace resources, but it
+        // has no ACP audio route.
+        audio = false,
+        image = true,
+        embeddedContext = true,
+    ),
+    mcpCapabilities = McpCapabilities(
+        http = true,
+        sse = true,
+    ),
+    sessionCapabilities = SessionCapabilities(
+        list = SessionListCapabilities(),
+        // The local app can copy its Conversation after a fork, but the Agent
+        // itself does not clone context for arbitrary ACP clients yet.
+        fork = null,
+        resume = SessionResumeCapabilities(),
+        delete = SessionDeleteCapabilities(),
+        close = SessionCloseCapabilities(),
+    ),
+)
 
 /**
  * Maps the shared ACP vocabulary at the Xiaowan adapter boundary. Keeping

@@ -6,6 +6,7 @@ import cn.com.omnimind.baselib.shizuku.PrivilegedActionPolicy
 import cn.com.omnimind.baselib.shizuku.ShizukuBackend
 import cn.com.omnimind.baselib.shizuku.ShizukuCapabilityManager
 import cn.com.omnimind.baselib.util.OmniLog
+import cn.com.omnimind.bot.agent.tool.AgentCapabilityToolDefinition
 import cn.com.omnimind.bot.plugin.OmniPluginToolDefinition
 import com.rk.terminal.runtime.TerminalDistribution
 import kotlinx.serialization.json.JsonArray
@@ -25,6 +26,7 @@ class AgentToolRegistry(
     private val conversationMode: String = AgentConversationModePolicy.AGENT_MODE,
     terminalDistribution: TerminalDistribution.Spec = TerminalDistribution.alpine,
     pluginToolDefinitions: List<OmniPluginToolDefinition> = emptyList(),
+    capabilityToolDefinitions: List<AgentCapabilityToolDefinition> = emptyList(),
     userMessage: String? = null,
     toolRoutingMode: AgentToolRoutingMode = AgentToolRoutingMode.DEFAULT,
     // Keep the visual-operation entry visible so the Agent can explain how
@@ -108,7 +110,7 @@ class AgentToolRegistry(
         }
         runtimeDefinitions.addAll(AgentToolDefinitions.memoryTools(locale))
         runtimeDefinitions.addAll(AgentToolDefinitions.subagentTools(locale))
-        if (pluginToolDefinitions.isNotEmpty()) {
+        if (pluginToolDefinitions.isNotEmpty() || capabilityToolDefinitions.isNotEmpty()) {
             val occupiedNames = runtimeDefinitions.mapNotNullTo(linkedSetOf()) { definition ->
                 (definition["function"] as? JsonObject)
                     ?.get("name")
@@ -132,6 +134,29 @@ class AgentToolRegistry(
                             }
                             put("description", JsonPrimitive(pluginTool.description))
                             put("parameters", pluginTool.parameters)
+                        })
+                    },
+                    locale,
+                    terminalDistribution
+                )
+            }
+            capabilityToolDefinitions.forEach { capabilityTool ->
+                require(capabilityTool.name !in occupiedNames) {
+                    "Capability tool conflicts with an existing tool: ${capabilityTool.name}"
+                }
+                occupiedNames += capabilityTool.name
+                runtimeDefinitions += AgentToolDefinitions.decorateToolDefinition(
+                    buildJsonObject {
+                        put("type", JsonPrimitive("function"))
+                        put("function", buildJsonObject {
+                            put("name", JsonPrimitive(capabilityTool.name))
+                            put("displayName", JsonPrimitive(capabilityTool.displayName))
+                            put("toolType", JsonPrimitive(capabilityTool.toolType))
+                            capabilityTool.serverName?.let {
+                                put("serverName", JsonPrimitive(it))
+                            }
+                            put("description", JsonPrimitive(capabilityTool.description))
+                            put("parameters", capabilityTool.parameters)
                         })
                     },
                     locale,

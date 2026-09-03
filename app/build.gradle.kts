@@ -399,6 +399,7 @@ dependencies {
     implementation(libs.ktor.server.call.logging)
     implementation(libs.mcp.kotlin.sdk.server)
     testImplementation(libs.junit)
+    testImplementation(libs.okhttp.mockwebserver)
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest )
 }
